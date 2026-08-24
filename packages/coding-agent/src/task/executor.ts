@@ -84,6 +84,8 @@ import {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	type TaskModelOverrideReason,
+	type TaskModelReceipt,
 	type TaskToolDetails,
 	type YieldItem,
 } from "./types";
@@ -2178,6 +2180,12 @@ interface FinalizeRunArgs {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/**
+	 * Resolution-time model decision for this run, captured by the spawn path
+	 * once the model resolved. Complete except for `model-retry-fallback`, which
+	 * only the settled run knows; {@link finalizeRunResult} appends it.
+	 */
+	modelReceipt?: TaskModelReceipt;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2196,6 +2204,21 @@ interface FinalizeRunArgs {
 	followUpTurn?: boolean;
 	sessionFile?: string;
 	startTime: number;
+}
+
+/**
+ * Seal a resolution-time model receipt with the one divergence only a settled
+ * run can report: a runtime retry fallback served a turn on some other model
+ * than the one resolution picked. Returns the receipt unchanged (no copy) when
+ * no fallback served, which is the common case.
+ */
+function sealModelReceipt(
+	receipt: TaskModelReceipt | undefined,
+	resolvedModelIsFallback: boolean | undefined,
+): TaskModelReceipt | undefined {
+	if (!receipt || resolvedModelIsFallback !== true) return receipt;
+	const overrides: TaskModelOverrideReason[] = [...(receipt.overrides ?? []), "model-retry-fallback"];
+	return { ...receipt, overrides };
 }
 
 /**
@@ -2345,6 +2368,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelRole,
 		resolvedModel: progress.resolvedModel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		modelReceipt: sealModelReceipt(args.modelReceipt, progress.resolvedModelIsFallback),
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2943,6 +2967,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
+	// Resolution-time model decision, filled in by `runSubagent` once the model
+	// resolves and read by `finalizeRunResult` after the run settles. Stays
+	// undefined when setup aborts before resolution, so the result carries no
+	// receipt rather than a half-filled one.
+	let modelReceipt: TaskModelReceipt | undefined;
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -3127,6 +3156,32 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
 						: formatModelStringWithRouting(model);
 			}
+			// Terminal receipt for this spawn's model decision. Recorded here, the
+			// one place that holds both the request (`modelPatterns`, the role alias
+			// behind them, `options.effort`) and the resolution (`model`,
+			// `effortLevel`). The role alias matches what the session-init record
+			// keeps below, so `@task` reads as `task` rather than as a raw pattern.
+			// The ceiling-clamp check re-runs the same pure mapping without a
+			// ceiling rather than reimplementing it; it is skipped entirely when no
+			// effort was requested, so the common spawn pays nothing.
+			const requestedRole = modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings);
+			const unclampedEffort =
+				options.effort !== undefined && spawnEffortCeiling !== undefined
+					? resolveTaskEffortLevel(model, options.effort)
+					: undefined;
+			const overrides: TaskModelOverrideReason[] = [];
+			if (modelPatterns.length > 0 && !model) overrides.push("model-unresolved");
+			if (authFallbackUsed) overrides.push("model-auth-fallback");
+			if (options.effort !== undefined && effortLevel === undefined) overrides.push("effort-unsupported");
+			if (unclampedEffort !== undefined && effortLevel !== unclampedEffort) overrides.push("effort-clamped");
+			const receipt: TaskModelReceipt = {};
+			if (options.effort !== undefined) receipt.requestedEffort = options.effort;
+			if (modelPatterns.length > 0) receipt.requestedModel = modelPatterns;
+			if (requestedRole !== undefined) receipt.requestedRole = requestedRole;
+			if (model) receipt.resolvedModel = formatModelStringWithRouting(model);
+			if (effortLevel !== undefined) receipt.resolvedEffort = effortLevel;
+			if (overrides.length > 0) receipt.overrides = overrides;
+			modelReceipt = receipt;
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
@@ -3702,6 +3757,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		modelOverride,
 		modelRole,
+		modelReceipt,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,

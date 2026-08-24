@@ -172,6 +172,7 @@ describe("task.batch schema gating", () => {
 
 		flatSession.settings.override("task.enableEffort", true);
 		expect(getSchemaProperties(flat).effort).toBeDefined();
+		expect(getSchemaProperties(flat).effort).toEqual({ type: "string", enum: ["lo", "med", "hi"] });
 		expect(flat.description).toContain("`effort`");
 
 		const batchSession = createSession({ settings: { "task.batch": true } });
@@ -181,6 +182,7 @@ describe("task.batch schema gating", () => {
 
 		batchSession.settings.override("task.enableEffort", true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
+		expect(getBatchItemProperties(batch).effort).toEqual({ type: "string", enum: ["lo", "med", "hi"] });
 		expect(batch.description).toContain("`effort`");
 	});
 
@@ -286,6 +288,24 @@ describe("task.batch validation", () => {
 			{ "task.batch": true },
 		);
 		expect(text).toContain("Duplicate task name");
+	});
+
+	it("rejects every out-of-enum effort selector with its call location", async () => {
+		const flat = await executeText(
+			{ agent: "task", task: "Work.", effort: "turbo" },
+			{ "task.batch": false, "task.enableEffort": true },
+		);
+		expect(flat).toContain('The call has an invalid `effort` value "turbo"');
+		expect(flat).toContain('Use "lo", "med", or "hi"');
+
+		const batch = await executeText(
+			{
+				context: "Shared background.",
+				tasks: [{ name: "Beta", task: "Work.", effort: "maximum" }],
+			},
+			{ "task.batch": true, "task.enableEffort": true },
+		);
+		expect(batch).toContain('Task 1 (`Beta`) has an invalid `effort` value "maximum"');
 	});
 
 	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {

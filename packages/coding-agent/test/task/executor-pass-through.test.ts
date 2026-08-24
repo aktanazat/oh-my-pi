@@ -368,6 +368,14 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		// The ceiling itself rides into the session so retry-fallback recovery
 		// can re-clamp to it after model swaps.
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Low);
+		expect(result.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: `${model.provider}/${model.id}`,
+			resolvedEffort: Effort.Low,
+			overrides: ["effort-clamped"],
+		});
 	});
 
 	it("rejects a spawn when task.maxEffort is below the model floor", async () => {
