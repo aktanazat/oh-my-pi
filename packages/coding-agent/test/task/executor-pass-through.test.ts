@@ -76,9 +76,10 @@ function yieldEmittingSession(model?: Model): AgentSession {
 	}, model);
 }
 
-function createSessionResult(session: AgentSession): CreateAgentSessionResult {
+function createSessionResult(session: AgentSession, modelPatternAuthFallbackUsed = false): CreateAgentSessionResult {
 	return {
 		session,
+		modelPatternAuthFallbackUsed,
 		extensionsResult: { extensions: [], errors: [], runtime: {} as unknown } as unknown as LoadExtensionsResult,
 		setToolUIContext: () => {},
 		eventBus: new EventBus(),
@@ -501,6 +502,67 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			requestedRole: "task",
 			resolvedModel: "mock/no-effort",
 			overrides: ["effort-unsupported"],
+		});
+	});
+
+	it("disposes a session when deferred ceiling validation rejects it", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const modelSelector = "mock/deferred-high-only";
+		// SAFETY: This fixture retains the bundled model contract and changes only the controllable effort range.
+		const model = {
+			...baseModel,
+			id: "deferred-high-only",
+			provider: "mock",
+			thinking: { mode: "effort", efforts: [Effort.High] },
+		} as Model;
+		const settings = Settings.isolated({ "task.maxEffort": "low" });
+		settings.setModelRole("task", modelSelector);
+		const session = yieldEmittingSession(model);
+		const dispose = vi.spyOn(session, "dispose");
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-deferred-ceiling-rejection",
+			modelOverride: ["@task"],
+			effort: "hi",
+			settings,
+			modelRegistry: createModelRegistry(),
+			keepAlive: false,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: modelSelector,
+		});
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("records deferred model authentication fallback in the receipt", async () => {
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("Expected bundled anthropic fallback model");
+		const fallbackSelector = "anthropic/claude-sonnet-4-5";
+		const session = yieldEmittingSession(fallbackModel);
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session, true));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-deferred-auth-fallback",
+			modelOverride: ["runtime-provider/runtime-model"],
+			parentActiveModelPattern: fallbackSelector,
+			settings: Settings.isolated(),
+			modelRegistry: createModelRegistry(),
+		});
+
+		expect(spy.mock.calls[0]?.[0]?.modelPatternAuthFallback).toBe(fallbackSelector);
+		expect(result.modelReceipt).toEqual({
+			requestedModel: ["runtime-provider/runtime-model"],
+			resolvedModel: fallbackSelector,
+			overrides: ["model-auth-fallback"],
 		});
 	});
 
