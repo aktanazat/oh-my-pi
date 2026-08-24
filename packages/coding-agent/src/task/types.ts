@@ -490,8 +490,9 @@ export type TaskModelOverrideReason =
  * Terminal receipt for one spawn's model decision: what the caller asked for,
  * what actually ran, and typed reasons whenever the two differ.
  *
- * Only present on results whose own run resolved a model. A follow-up turn on an
- * already-live session reuses that session's model and carries no receipt.
+ * Present on an initial run that resolved a model or received a model/effort
+ * request, so a failed unresolved request remains reportable. A follow-up turn
+ * on an already-live session reuses that session's model and carries no receipt.
  *
  * {@link resolvedModel} is the resolution-time choice, without a thinking-level
  * suffix. {@link SingleResult.resolvedModel} reports the model that last served a

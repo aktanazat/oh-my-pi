@@ -22,7 +22,10 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
+function createMockSession(
+	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void,
+	model?: Model,
+): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
@@ -30,7 +33,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 	const session = {
 		state: { messages: [] },
 		agent: { state: { systemPrompt: ["test"] } },
-		model: undefined,
+		model,
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
@@ -58,7 +61,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 	return session as unknown as AgentSession;
 }
 
-function yieldEmittingSession(): AgentSession {
+function yieldEmittingSession(model?: Model): AgentSession {
 	return createMockSession(({ emit }) => {
 		emit({
 			type: "tool_execution_end",
@@ -70,7 +73,7 @@ function yieldEmittingSession(): AgentSession {
 			},
 			isError: false,
 		});
-	});
+	}, model);
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -100,11 +103,11 @@ const baseOptions = {
 	enableLsp: false,
 };
 
-function createModelRegistry(model: Model): ModelRegistry {
+function createModelRegistry(...models: Model[]): ModelRegistry {
 	return {
 		authStorage: {},
 		refresh: async () => {},
-		getAvailable: () => [model],
+		getAvailable: () => models,
 		getApiKey: async () => "test-key",
 	} as unknown as ModelRegistry;
 }
@@ -378,6 +381,44 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		});
 	});
 
+	it("reconciles a deferred model receipt after session-level discovery", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const modelSelector = "mock/deferred-effort";
+		// SAFETY: This fixture retains the bundled model contract and changes only the controllable effort range.
+		const model = {
+			...baseModel,
+			id: "deferred-effort",
+			provider: "mock",
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+		} as Model;
+		const settings = Settings.isolated();
+		settings.setModelRole("task", modelSelector);
+		const spy = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(yieldEmittingSession(model)));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-deferred-model-receipt",
+			modelOverride: ["@task"],
+			effort: "hi",
+			settings,
+			modelRegistry: createModelRegistry(),
+		});
+
+		expect(spy.mock.calls[0]?.[0]?.model).toBeUndefined();
+		expect(spy.mock.calls[0]?.[0]?.modelPattern).toEqual(["@task"]);
+		expect(result.resolvedModel).toBe(modelSelector);
+		expect(result.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: modelSelector,
+			resolvedEffort: Effort.High,
+		});
+	});
+
 	it("rejects a spawn when task.maxEffort is below the model floor", async () => {
 		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
@@ -405,6 +446,62 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			"mock/mock-high-only has no supported thinking effort at or below task.maxEffort=low",
 		);
 		expect(spy).not.toHaveBeenCalled();
+		expect(result.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: "mock/mock-high-only",
+		});
+	});
+
+	it("reports effort support only after a model resolves", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const unresolvedSettings = Settings.isolated();
+		unresolvedSettings.setModelRole("task", "mock/not-found");
+		// SAFETY: This fixture retains the bundled model contract and changes only the controllable effort range.
+		const noEffortModel = {
+			...baseModel,
+			id: "no-effort",
+			provider: "mock",
+			thinking: { mode: "effort", efforts: [] },
+		} as Model;
+		const noEffortSettings = Settings.isolated();
+		noEffortSettings.setModelRole("task", "mock/no-effort");
+		vi.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()))
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession(noEffortModel)));
+
+		const unresolved = await runSubprocess({
+			...baseOptions,
+			id: "subagent-unresolved-effort",
+			modelOverride: ["@task"],
+			effort: "hi",
+			settings: unresolvedSettings,
+			modelRegistry: createModelRegistry(),
+		});
+		const unsupported = await runSubprocess({
+			...baseOptions,
+			id: "subagent-unsupported-effort",
+			modelOverride: ["@task"],
+			effort: "hi",
+			settings: noEffortSettings,
+			modelRegistry: createModelRegistry(noEffortModel),
+		});
+
+		expect(unresolved.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			overrides: ["model-unresolved"],
+		});
+		expect(unsupported.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: "mock/no-effort",
+			overrides: ["effort-unsupported"],
+		});
 	});
 
 	it("preserves the model's full effort range by default", async () => {
