@@ -7,6 +7,10 @@
 - Added `report` field to scout agent definitions for detailed, non-summarized findings
 - Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
 
+### Changed
+
+- Task results now carry a typed model receipt naming the requested model, role, and effort, what resolution actually selected, and coded reasons whenever the two diverge. The parent agent reads it in the task summary and the TUI shows it on each finished spawn.
+
 ### Fixed
 
 - Fixed protocol handler incorrectly escaping raw text content from agent responses
