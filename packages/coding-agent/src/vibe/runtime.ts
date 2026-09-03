@@ -1528,7 +1528,15 @@ export class VibeSessionRegistry {
 		const traceOverflow = Math.max(0, turn.toolCount - turn.trace.length);
 		let response = result.output.trim() || "(no output)";
 		let responseTruncated = false;
-		if (response.length > RESPONSE_PREVIEW_MAX) {
+		// Truncating requires somewhere to send the caller for the rest. The
+		// `agent://<id>` pointer in the template resolves by scanning for
+		// `<id>.md`, which `finalizeRunResult()` publishes only after
+		// `writeArtifact()` verified it, so an unverified write leaves
+		// `outputPath` unset and that URI absent (issue #9646). Without this
+		// guard a long turn advertises a pointer to nothing and the withheld
+		// bytes are unreachable; keep the full response inline instead. This
+		// mirrors the gate #9649 applied to the task envelope.
+		if (response.length > RESPONSE_PREVIEW_MAX && result.outputPath) {
 			const slice = response.slice(0, RESPONSE_PREVIEW_MAX);
 			const lastNewline = slice.lastIndexOf("\n");
 			response = lastNewline > 0 ? slice.slice(0, lastNewline) : slice;

@@ -14,6 +14,7 @@
 - Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
 - Fixed the status line missing from the first frame at startup and appearing only after the session loaded; the last run's status row is cached per project and painted immediately, then replaced in place by the live one.
 - Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
+- Fixed a long `vibe` turn advertising `full-output="agent://<id>"` when the worker published no output artifact, leaving the withheld tail unreachable; truncation is now gated on the artifact and the full response stays inline without one.
 
 ## [18.1.5] - 2026-09-03
 
