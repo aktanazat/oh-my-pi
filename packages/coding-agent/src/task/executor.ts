@@ -2206,43 +2206,55 @@ interface FinalizeRunArgs {
 	startTime: number;
 }
 
+/** What a spawn asked its model resolution for, and what resolution returned. */
+interface TaskModelDecision {
+	/** Pre-expansion model patterns requested for this spawn. */
+	patterns: string[];
+	/** Model role alias behind those patterns, when one is named. */
+	role?: string;
+	/** Coarse effort the caller requested. */
+	requestedEffort?: TaskEffort;
+	/** Model resolution selected. Absent when nothing resolved. */
+	model?: Model;
+	/** Resolution replaced the requested model for want of credentials. */
+	authFallback: boolean;
+	/**
+	 * Result of mapping {@link requestedEffort} onto the resolved model. Absent
+	 * while the mapping has not run yet, which keeps the receipt written ahead of
+	 * it from claiming the model exposes no controllable effort.
+	 */
+	effort?: {
+		/** Effort the run starts at, after the `task.maxEffort` ceiling. */
+		level: TaskModelReceipt["resolvedEffort"];
+		/** Same mapping without the ceiling, so a clamp is detectable. */
+		unclamped: TaskModelReceipt["resolvedEffort"];
+	};
+}
+
 /** Build the one terminal record of a spawn's model decision. */
-function buildTaskModelReceipt(
-	modelPatterns: string[],
-	requestedRole: string | undefined,
-	requestedEffort: TaskEffort | undefined,
-	model: Model | undefined,
-	effortLevel: TaskModelReceipt["resolvedEffort"],
-	unclampedEffort: TaskModelReceipt["resolvedEffort"],
-	authFallbackUsed: boolean,
-	effortResolved: boolean,
-): TaskModelReceipt | undefined {
-	if (
-		model === undefined &&
-		modelPatterns.length === 0 &&
-		requestedRole === undefined &&
-		requestedEffort === undefined
-	) {
-		return undefined;
-	}
+function buildTaskModelReceipt(decision: TaskModelDecision): TaskModelReceipt | undefined {
+	const { patterns, role, requestedEffort, model, effort } = decision;
+	if (!model && patterns.length === 0 && role === undefined && requestedEffort === undefined) return undefined;
 	const overrides: TaskModelOverrideReason[] = [];
-	if (modelPatterns.length > 0 && model === undefined) overrides.push("model-unresolved");
-	if (authFallbackUsed) overrides.push("model-auth-fallback");
-	if (effortResolved && model && requestedEffort !== undefined && effortLevel === undefined) {
-		overrides.push("effort-unsupported");
-	}
-	if (effortResolved && model && unclampedEffort !== undefined && effortLevel !== unclampedEffort) {
-		overrides.push("effort-clamped");
+	if (patterns.length > 0 && !model) overrides.push("model-unresolved");
+	if (decision.authFallback) overrides.push("model-auth-fallback");
+	if (model && effort) {
+		// Effort support is only knowable once a model resolved and the mapping
+		// ran. Without both, an absent level means "not yet asked", not
+		// "unsupported", so neither effort reason fires.
+		if (requestedEffort !== undefined && effort.level === undefined) overrides.push("effort-unsupported");
+		if (effort.unclamped !== undefined && effort.level !== effort.unclamped) overrides.push("effort-clamped");
 	}
 	const receipt: TaskModelReceipt = {};
 	if (requestedEffort !== undefined) receipt.requestedEffort = requestedEffort;
-	if (modelPatterns.length > 0) receipt.requestedModel = modelPatterns;
-	if (requestedRole !== undefined) receipt.requestedRole = requestedRole;
+	if (patterns.length > 0) receipt.requestedModel = patterns;
+	if (role !== undefined) receipt.requestedRole = role;
 	if (model) receipt.resolvedModel = formatModelStringWithRouting(model);
-	if (model && effortLevel !== undefined) receipt.resolvedEffort = effortLevel;
+	if (model && effort?.level !== undefined) receipt.resolvedEffort = effort.level;
 	if (overrides.length > 0) receipt.overrides = overrides;
 	return receipt;
 }
+
 /**
  * Seal a resolution-time model receipt with the one divergence only a settled
  * run can report: a runtime retry fallback served a turn on some other model
@@ -3179,30 +3191,39 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			const spawnEffortCeiling = options.effort !== undefined ? settings.get("task.maxEffort") : undefined;
 			const requestedRole = modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings);
-			if (model && options.effort !== undefined && spawnEffortCeiling !== undefined) {
-				// Preserve the request and resolved model before ceiling validation: that
-				// mapping can reject a model whose effort floor exceeds the ceiling.
-				modelReceipt = buildTaskModelReceipt(
-					modelPatterns,
-					requestedRole,
-					options.effort,
-					model,
-					undefined,
-					undefined,
-					receiptAuthFallbackUsed,
-					false,
-				);
-			}
-			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling.
-			// Undefined (no effort, or no controllable effort surface) falls
-			// through to the normal selectors below.
+			/**
+			 * Record this spawn's model decision and return the effort the run
+			 * starts at. Caller-requested coarse effort maps onto the resolved
+			 * model's supported range, then respects the operator-configured
+			 * ceiling. Undefined (no effort, or no controllable effort surface)
+			 * falls through to the normal selectors below.
+			 *
+			 * The receipt lands in two writes on purpose. Request and resolved model
+			 * go first, because the mapping can reject the spawn outright when the
+			 * model's effort floor exceeds the ceiling, and that failed result must
+			 * still name the model it rejected. The clamp check re-runs the same
+			 * pure mapping without a ceiling instead of reimplementing it, and only
+			 * when a ceiling is configured, so the common spawn pays nothing.
+			 */
+			const recordModelDecision = (resolved: Model | undefined): TaskModelReceipt["resolvedEffort"] => {
+				const decision: TaskModelDecision = {
+					patterns: modelPatterns,
+					role: requestedRole,
+					requestedEffort: options.effort,
+					model: resolved,
+					authFallback: receiptAuthFallbackUsed,
+				};
+				modelReceipt = buildTaskModelReceipt(decision);
+				if (options.effort === undefined) return undefined;
+				const level = resolveTaskEffortLevel(resolved, options.effort, spawnEffortCeiling);
+				const unclamped =
+					spawnEffortCeiling !== undefined ? resolveTaskEffortLevel(resolved, options.effort) : undefined;
+				modelReceipt = buildTaskModelReceipt({ ...decision, effort: { level, unclamped } });
+				return level;
+			};
 			// The ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
-			const effortLevel =
-				options.effort !== undefined
-					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
-					: undefined;
+			const effortLevel = recordModelDecision(model);
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
 				progress.resolvedModel =
@@ -3210,23 +3231,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
 						: formatModelStringWithRouting(model);
 			}
-			// The ceiling-clamp check re-runs the same pure mapping without a
-			// ceiling rather than reimplementing it; it is skipped entirely when no
-			// effort was requested, so the common spawn pays nothing.
-			const unclampedEffort =
-				options.effort !== undefined && spawnEffortCeiling !== undefined
-					? resolveTaskEffortLevel(model, options.effort)
-					: undefined;
-			modelReceipt = buildTaskModelReceipt(
-				modelPatterns,
-				requestedRole,
-				options.effort,
-				model,
-				effortLevel,
-				unclampedEffort,
-				receiptAuthFallbackUsed,
-				true,
-			);
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
@@ -3445,46 +3449,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			// `createAgentSession` retries deferred patterns after extension and
 			// provider discovery. Rebuild the receipt from the session's actual
-			// model, not the model-less provisional mapping used to start it.
+			// model, not the model-less provisional mapping used to start it, and
+			// seed the serving model so a spawn that dies before its first event
+			// still reports what ran.
 			const deferredModel = model === undefined ? session.model : undefined;
 			if (deferredModel) {
-				if (options.effort !== undefined && spawnEffortCeiling !== undefined) {
-					modelReceipt = buildTaskModelReceipt(
-						modelPatterns,
-						requestedRole,
-						options.effort,
-						deferredModel,
-						undefined,
-						undefined,
-						receiptAuthFallbackUsed,
-						false,
-					);
-				}
-				const deferredEffortLevel =
-					options.effort !== undefined
-						? resolveTaskEffortLevel(deferredModel, options.effort, spawnEffortCeiling)
-						: undefined;
-				const deferredUnclampedEffort =
-					options.effort !== undefined && spawnEffortCeiling !== undefined
-						? resolveTaskEffortLevel(deferredModel, options.effort)
-						: undefined;
-				modelReceipt = buildTaskModelReceipt(
-					modelPatterns,
-					requestedRole,
-					options.effort,
-					deferredModel,
-					deferredEffortLevel,
-					deferredUnclampedEffort,
-					receiptAuthFallbackUsed,
-					true,
-				);
+				recordModelDecision(deferredModel);
 				const serving = session.servingModel;
-				if (serving) {
-					progress.resolvedModel = serving.selector;
-					progress.resolvedModelIsFallback = serving.isFallback;
-				} else {
-					progress.resolvedModel = formatModelStringWithRouting(deferredModel);
-				}
+				progress.resolvedModel = serving?.selector ?? formatModelStringWithRouting(deferredModel);
+				if (serving) progress.resolvedModelIsFallback = serving.isFallback;
 			}
 
 			// Run-state notifications precede deferrable wire-level `agent_end`,
