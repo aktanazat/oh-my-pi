@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic requests failing with HTTP 400 `At least one of the image dimensions exceed max allowed size: 8000 pixels` when a tall screenshot (for example a full-page browser capture) sat in history; every image is now clamped to Anthropic's 8000px per-side limit instead of only when a request carries more than 20 images.
+
 ## [18.0.1] - 2026-08-23
 
 ### Changed

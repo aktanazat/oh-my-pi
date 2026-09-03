@@ -144,7 +144,26 @@ describe("Anthropic many-image payload resizing", () => {
 		expect(height).toBeLessThanOrEqual(2000);
 	});
 
-	it("leaves oversized images untouched below the many-image threshold", async () => {
+	it("clamps a single image past Anthropic's hard 8000px limit", async () => {
+		// Reproduces the 400 "At least one of the image dimensions exceed max
+		// allowed size: 8000 pixels" from a full-page screenshot tool result.
+		const tallData = await makeRedPng(1440, 8570);
+		const tallImage: ImageContent = { type: "image", data: tallData, mimeType: "image/png" };
+		const context = makeToolResultContext([tallImage]);
+
+		const payload = await capturePayload(context);
+
+		const images = extractToolResultImages(payload);
+		expect(images).toHaveLength(1);
+		expect(images[0].source.data).not.toBe(tallData);
+		expect(tallImage.data).toBe(tallData);
+
+		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
+		expect(height).toBe(8000);
+		expect(width).toBe(1344);
+	});
+
+	it("leaves images within the hard limit untouched below the many-image threshold", async () => {
 		const largeData = await makeRedPng(2400, 1200);
 		const largeImage: ImageContent = { type: "image", data: largeData, mimeType: "image/png" };
 		const smallImage: ImageContent = { type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" };

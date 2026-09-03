@@ -821,6 +821,15 @@ function decodeAnthropicToolName(name: string, isOAuthToken: boolean, escapeBuil
 
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
 const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
+/**
+ * Hard API limit. Anthropic rejects any image whose width or height exceeds
+ * this ("At least one of the image dimensions exceed max allowed size: 8000
+ * pixels") no matter how many images the request carries, and the rejection
+ * poisons every retry and model fallback because the block stays in context.
+ * Tall full-page screenshots cross it routinely, so every request clamps to it.
+ */
+const ANTHROPIC_MAX_IMAGE_DIMENSION = 8000;
+type AnthropicImageCap = typeof ANTHROPIC_MANY_IMAGE_MAX_DIMENSION | typeof ANTHROPIC_MAX_IMAGE_DIMENSION;
 
 function countAnthropicImageBlocks(messages: Message[]): number {
 	let count = 0;
@@ -837,13 +846,18 @@ function countAnthropicImageBlocks(messages: Message[]): number {
 const ANTHROPIC_IMAGE_RESIZE_CONCURRENCY = 4;
 
 /**
- * Memoized resize results keyed on ImageContent identity. Callers keep message
- * objects stable across turns, so without this every request (and every
- * in-provider retry of a fresh turn) re-decodes and re-encodes the same
- * oversized screenshots. A cached value identical to the key means "already
- * within bounds / unresizable — skip the decode".
+ * Memoized resize results keyed on ImageContent identity, per target
+ * dimension. Callers keep message objects stable across turns, so without this
+ * every request (and every in-provider retry of a fresh turn) re-decodes and
+ * re-encodes the same oversized screenshots. A cached value identical to the
+ * key means "already within bounds / unresizable — skip the decode". The cap
+ * depends on image count, so each cap keeps its own cache: a value cached at
+ * 8000px is not reusable at 2000px.
  */
-const anthropicManyImageResizeCache = new WeakMap<ImageContent, ImageContent>();
+const anthropicImageResizeCaches: Record<AnthropicImageCap, WeakMap<ImageContent, ImageContent>> = {
+	[ANTHROPIC_MANY_IMAGE_MAX_DIMENSION]: new WeakMap(),
+	[ANTHROPIC_MAX_IMAGE_DIMENSION]: new WeakMap(),
+};
 
 type ResizeLimiter = <R>(fn: () => Promise<R>) => Promise<R>;
 
@@ -874,16 +888,16 @@ function createResizeLimiter(limit: number): ResizeLimiter {
 	};
 }
 
-async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<ImageContent> {
+async function resizeAnthropicImageBlock(block: ImageContent, maxDimension: number): Promise<ImageContent> {
 	try {
 		const inputBuffer = Buffer.from(block.data, "base64");
 		const { width, height } = await new Bun.Image(inputBuffer).metadata();
 		if (!width || !height) return block;
-		if (width <= ANTHROPIC_MANY_IMAGE_MAX_DIMENSION && height <= ANTHROPIC_MANY_IMAGE_MAX_DIMENSION) return block;
+		if (width <= maxDimension && height <= maxDimension) return block;
 
-		const scale = Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION / width, ANTHROPIC_MANY_IMAGE_MAX_DIMENSION / height);
-		const targetWidth = Math.max(1, Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION, Math.round(width * scale)));
-		const targetHeight = Math.max(1, Math.min(ANTHROPIC_MANY_IMAGE_MAX_DIMENSION, Math.round(height * scale)));
+		const scale = Math.min(maxDimension / width, maxDimension / height);
+		const targetWidth = Math.max(1, Math.min(maxDimension, Math.round(width * scale)));
+		const targetHeight = Math.max(1, Math.min(maxDimension, Math.round(height * scale)));
 
 		const [png, jpeg] = await Promise.all([
 			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).png().bytes(),
@@ -898,7 +912,7 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 			mimeType: best.mimeType,
 		};
 	} catch (error) {
-		logger.warn("anthropic: failed to resize oversized image for many-image request", {
+		logger.warn("anthropic: failed to resize oversized image", {
 			mimeType: block.mimeType,
 			error: error instanceof Error ? error.message : String(error),
 		});
@@ -906,10 +920,11 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 	}
 }
 
-async function resizeAnthropicManyImageContent(
+async function resizeAnthropicImageContent(
 	content: (TextContent | ImageContent)[],
 	state: { resized: number },
 	limit: ResizeLimiter,
+	maxDimension: AnthropicImageCap,
 ): Promise<(TextContent | ImageContent)[]> {
 	let changed = false;
 	const next = await Promise.all(
@@ -923,10 +938,11 @@ async function resizeAnthropicManyImageContent(
 				(block.providerFile?.provider === "anthropic" && block.providerFile.id)
 			)
 				return block;
-			let resized = anthropicManyImageResizeCache.get(block);
+			const cache = anthropicImageResizeCaches[maxDimension];
+			let resized = cache.get(block);
 			if (resized === undefined) {
-				resized = await limit(() => resizeAnthropicManyImageBlock(block));
-				anthropicManyImageResizeCache.set(block, resized);
+				resized = await limit(() => resizeAnthropicImageBlock(block, maxDimension));
+				cache.set(block, resized);
 			}
 			if (resized !== block) {
 				changed = true;
@@ -938,43 +954,48 @@ async function resizeAnthropicManyImageContent(
 	return changed ? next : content;
 }
 
-async function resizeAnthropicManyImageMessage(
+async function resizeAnthropicImageMessage(
 	message: Message,
 	state: { resized: number },
 	limit: ResizeLimiter,
+	maxDimension: AnthropicImageCap,
 ): Promise<Message> {
 	if (message.role === "user" || message.role === "developer") {
 		if (!Array.isArray(message.content)) return message;
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
+		const content = await resizeAnthropicImageContent(message.content, state, limit, maxDimension);
 		return content === message.content ? message : { ...message, content };
 	}
 	if (message.role === "toolResult") {
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
+		const content = await resizeAnthropicImageContent(message.content, state, limit, maxDimension);
 		return content === message.content ? message : { ...message, content };
 	}
 	return message;
 }
 
-async function prepareAnthropicManyImageContext(context: Context, supportsImages: boolean): Promise<Context> {
+async function prepareAnthropicImageContext(context: Context, supportsImages: boolean): Promise<Context> {
 	if (!supportsImages) return context;
 	const imageCount = countAnthropicImageBlocks(context.messages);
-	if (imageCount <= ANTHROPIC_MANY_IMAGE_THRESHOLD) return context;
+	if (imageCount === 0) return context;
+	// Many images share one request size budget, so they get the tighter cap.
+	// A smaller set only has to clear Anthropic's hard per-image limit.
+	const maxDimension =
+		imageCount > ANTHROPIC_MANY_IMAGE_THRESHOLD ? ANTHROPIC_MANY_IMAGE_MAX_DIMENSION : ANTHROPIC_MAX_IMAGE_DIMENSION;
 
 	let changed = false;
 	const state = { resized: 0 };
 	const limit = createResizeLimiter(ANTHROPIC_IMAGE_RESIZE_CONCURRENCY);
 	const messages = await Promise.all(
 		context.messages.map(async message => {
-			const next = await resizeAnthropicManyImageMessage(message, state, limit);
+			const next = await resizeAnthropicImageMessage(message, state, limit, maxDimension);
 			if (next !== message) changed = true;
 			return next;
 		}),
 	);
 	if (!changed) return context;
-	logger.debug("anthropic: resized oversized images for many-image request", {
+	logger.debug("anthropic: resized oversized images", {
 		imageCount,
 		resized: state.resized,
-		maxDimension: ANTHROPIC_MANY_IMAGE_MAX_DIMENSION,
+		maxDimension,
 	});
 	return { ...context, messages };
 }
@@ -1989,7 +2010,7 @@ const streamAnthropicOnce = (
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
-			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
+			const preparedContext = await prepareAnthropicImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				let nextParams = buildParams(model, preparedContext, isOAuthToken, options, {
 					disableStrictTools,
