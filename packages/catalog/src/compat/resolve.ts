@@ -859,6 +859,10 @@ function resolveAnthropicPolicy(
 		escapeBuiltinToolNames: false,
 		injectClaudeCodeInstruction: true,
 		stripImageInput: false,
+		// Unset means "canonical Anthropic image contract"; the request builder
+		// owns those numbers. The keys must exist for a KDL rule or a
+		// user-authored `compat` block to override them.
+		maxImageDimension: undefined,
 		thinkingLoopGuard: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};

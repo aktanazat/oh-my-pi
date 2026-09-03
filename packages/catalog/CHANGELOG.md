@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `max-image-dimension` compat axis so an Anthropic-compatible host whose per-side image limit differs from the canonical API can override it instead of inheriting 8000px.
+
 ## [18.1.5] - 2026-09-03
 
 ### Added
