@@ -863,6 +863,7 @@ function resolveAnthropicPolicy(
 		// owns those numbers. The keys must exist for a KDL rule or a
 		// user-authored `compat` block to override them.
 		maxImageDimension: undefined,
+		maxImagePayloadBytes: undefined,
 		thinkingLoopGuard: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};

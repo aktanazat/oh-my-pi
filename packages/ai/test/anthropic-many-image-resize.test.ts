@@ -184,6 +184,31 @@ describe("Anthropic many-image payload resizing", () => {
 		expect(width).toBe(1344);
 	});
 
+	it("re-encodes an image past Anthropic's 10 MB payload limit", async () => {
+		// Reproduces the 400 "image exceeds 10 MB maximum: 14012300 bytes >
+		// 10485760 bytes" from a dense full-page screenshot: inside the 8000px
+		// cap, over the byte cap. Trailing bytes after IEND stand in for that
+		// payload so the test does not spend a minute encoding noise.
+		const seed = Buffer.from(RED_1X1_PNG_BASE64, "base64");
+		const canvas = await new Bun.Image(seed).resize(1200, 900, { filter: "nearest" }).png().bytes();
+		const heavyData = Buffer.concat([Buffer.from(canvas), Buffer.alloc(8 * 1024 * 1024, 7)]).toString("base64");
+		expect(heavyData.length).toBeGreaterThan(10 * 1024 * 1024);
+		const heavyImage: ImageContent = { type: "image", data: heavyData, mimeType: "image/png" };
+		const context = makeToolResultContext([heavyImage]);
+
+		const payload = await capturePayload(context);
+
+		const images = extractToolResultImages(payload);
+		expect(images).toHaveLength(1);
+		expect(images[0].source.data.length).toBeLessThanOrEqual(9 * 1024 * 1024);
+		expect(heavyImage.data).toBe(heavyData);
+
+		// Only the payload was over the limit, so the pixels survive intact.
+		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
+		expect(width).toBe(1200);
+		expect(height).toBe(900);
+	});
+
 	it("leaves images within the hard limit untouched below the many-image threshold", async () => {
 		const largeData = await makeRedPng(2400, 1200);
 		const largeImage: ImageContent = { type: "image", data: largeData, mimeType: "image/png" };
