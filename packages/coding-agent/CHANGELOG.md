@@ -22,6 +22,7 @@
 
 - Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
 - Restored mouse clicks, hover, and wheel scrolling in Plan Review.
+- Added the `trustedExtensions` setting: user-level trusted extension paths load through normal discovery, survive `--no-extensions`, keep running inside restricted subagents, and abort startup when missing or broken.
 
 ## [18.1.9] - 2026-09-04
 
