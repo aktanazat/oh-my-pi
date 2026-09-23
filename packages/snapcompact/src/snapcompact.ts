@@ -45,7 +45,7 @@
  * re-attached to the compaction summary message on every context rebuild.
  */
 
-import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
@@ -468,6 +468,17 @@ export const MAX_FRAMES_DEFAULT = 80;
  *  text region (newest) — with the denser low-quality tier filling the middle. */
 export const HQ_EDGE_FRAMES = 3;
 
+/** Newest verbatim user directives (mid-turn `steering` messages) carried on
+ *  the archive as plain summary text, by count and by total characters. They
+ *  never enter a frame and never count against the frame budget: a directive
+ *  that lands in the imaged or dropped middle of the transcript is exactly the
+ *  one the model would otherwise act against (its pre-directive plan survives
+ *  in the kept text). The newest directive is always kept whole, even when it
+ *  alone exceeds the character cap; older ones fall off newest-first and the
+ *  summary states how many were omitted. */
+export const DIRECTIVES_MAX_COUNT = 32;
+export const DIRECTIVES_MAX_CHARS = 8_000;
+
 /** Conservative per-frame token estimate used for context budgeting — the
  *  upper bound across shapes: high-res Claude frames hit the 4,784 visual-token
  *  cap, billed at +5% margin (ceil(4784 * 1.05)). Keeps the overflow guard from
@@ -576,6 +587,12 @@ export interface Archive {
 	textHead?: string;
 	/** Newest text region kept verbatim around the imaged middle. */
 	textTail?: string;
+	/** Verbatim mid-turn user directives (`steering` messages) from every
+	 *  compacted range, oldest to newest, capped by {@link DIRECTIVES_MAX_COUNT}
+	 *  and {@link DIRECTIVES_MAX_CHARS}. Printed as text in the summary, never imaged. */
+	directives?: string[];
+	/** Older directives dropped from {@link directives} by the ledger caps. */
+	omittedDirectives?: number;
 }
 
 export interface Geometry {
@@ -727,6 +744,65 @@ export function upsertFileOperations(
 	if (!fileOperations) return baseSummary;
 	if (!baseSummary) return fileOperations;
 	return `${baseSummary}\n\n${fileOperations}`;
+}
+
+// ============================================================================
+// User directive ledger
+// ============================================================================
+
+/** Text of a user message, image blocks skipped. */
+function userContentText(content: UserMessage["content"]): string {
+	return typeof content === "string"
+		? content
+		: content
+				.filter((block): block is TextContent => block.type === "text")
+				.map(block => block.text)
+				.join("");
+}
+
+/** Verbatim text of every mid-turn user directive (`steering` message) in
+ *  `messages`, in order. Data URLs collapse to their placeholder as in every
+ *  other archived text; nothing else is rewritten. */
+export function userDirectives(messages: Message[]): string[] {
+	const directives: string[] = [];
+	for (const msg of messages) {
+		if (msg.role !== "user" || msg.steering !== true) continue;
+		const text = userContentText(msg.content);
+		if (text.trim().length > 0) directives.push(elideDataUrls(text));
+	}
+	return directives;
+}
+
+/** Fold a compacted range's directives onto the previous archive's ledger,
+ *  keeping the newest {@link DIRECTIVES_MAX_COUNT} within
+ *  {@link DIRECTIVES_MAX_CHARS}; the newest one is kept regardless of size. */
+function planDirectives(
+	previous: Archive | undefined,
+	fresh: string[],
+): Pick<Archive, "directives" | "omittedDirectives"> {
+	const all = [...(previous?.directives ?? []), ...fresh];
+	let kept = 0;
+	let chars = 0;
+	while (kept < all.length && kept < DIRECTIVES_MAX_COUNT) {
+		const next = all[all.length - 1 - kept].length;
+		if (kept > 0 && chars + next > DIRECTIVES_MAX_CHARS) break;
+		chars += next;
+		kept++;
+	}
+	const omittedDirectives = (previous?.omittedDirectives ?? 0) + (all.length - kept);
+	return {
+		...(kept > 0 ? { directives: all.slice(all.length - kept) } : {}),
+		...(omittedDirectives > 0 ? { omittedDirectives } : {}),
+	};
+}
+
+/** Format the ledger for the summary: one `¶user:` scope per directive, oldest
+ *  to newest, opened by an explicit count of whatever the caps dropped. */
+function formatDirectives(directives: string[] | undefined, omitted: number | undefined): string {
+	const parts: string[] = [];
+	if (omitted) parts.push(`[…${omitted} older directive${omitted === 1 ? "" : "s"} omitted…]`);
+	for (const directive of directives ?? []) parts.push(`¶user:${directive}`);
+	return parts.join("\n\n");
 }
 
 // ============================================================================
@@ -980,13 +1056,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
-			const content =
-				typeof msg.content === "string"
-					? msg.content
-					: msg.content
-							.filter((content): content is { type: "text"; text: string } => content.type === "text")
-							.map(content => content.text)
-							.join("");
+			const content = userContentText(msg.content);
 			if (content) pushPart("¶user:", stripDimMarkers(content));
 		} else if (msg.role === "assistant") {
 			// Stream blocks in content order: buffer thinking/text, then flush a
@@ -1720,6 +1790,11 @@ export function getPreservedArchive(preserveData: Record<string, unknown> | unde
 	const text = typeof archive.text === "string" && archive.text.length > 0 ? archive.text : undefined;
 	const textHead = typeof archive.textHead === "string" && archive.textHead.length > 0 ? archive.textHead : undefined;
 	const textTail = typeof archive.textTail === "string" && archive.textTail.length > 0 ? archive.textTail : undefined;
+	const directives = Array.isArray(archive.directives)
+		? archive.directives.filter((directive): directive is string => typeof directive === "string" && directive.length > 0)
+		: [];
+	const omittedDirectives =
+		typeof archive.omittedDirectives === "number" && archive.omittedDirectives > 0 ? archive.omittedDirectives : 0;
 	// A text-only archive (everything fit in the plain-text regions) is valid;
 	// only an archive carrying neither frames nor text is empty.
 	if (frames.length === 0 && text === undefined && textHead === undefined && textTail === undefined) return undefined;
@@ -1730,6 +1805,8 @@ export function getPreservedArchive(preserveData: Record<string, unknown> | unde
 		...(text !== undefined ? { text } : {}),
 		...(textHead !== undefined ? { textHead } : {}),
 		...(textTail !== undefined ? { textTail } : {}),
+		...(directives.length > 0 ? { directives } : {}),
+		...(omittedDirectives > 0 ? { omittedDirectives } : {}),
 	};
 }
 
@@ -2113,6 +2190,11 @@ export async function compact<TMessage = Message>(
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
 	const serialized = serializeConversation(llmMessages, options);
 	const previousArchive = getPreservedArchive(previousPreserveData);
+	// Mid-turn directives ride the archive as text, outside the frame budget:
+	// wherever they fall in the transcript (imaged middle, dropped middle), the
+	// summary prints them verbatim, newest kept first under the ledger caps.
+	const ledger = planDirectives(previousArchive, userDirectives(llmMessages));
+	const directives = formatDirectives(ledger.directives, ledger.omittedDirectives);
 	const previousTextRaw =
 		previousArchive?.text ??
 		[previousArchive?.textHead, previousArchive?.textTail]
@@ -2206,7 +2288,13 @@ export async function compact<TMessage = Message>(
 	const files = formatFileList(readFiles, modifiedFiles, fileOps.read);
 
 	let summary: string;
-	if (frames.length === 0 && textHead.length === 0 && textTail.length === 0 && files.length === 0) {
+	if (
+		frames.length === 0 &&
+		textHead.length === 0 &&
+		textTail.length === 0 &&
+		files.length === 0 &&
+		directives.length === 0
+	) {
 		summary = "No prior history.";
 	} else {
 		summary = prompt.render(snapcompactSummaryPrompt, {
@@ -2221,6 +2309,7 @@ export async function compact<TMessage = Message>(
 			truncatedChars,
 			includedPreviousSummary,
 			files: files.length > 0 ? files : undefined,
+			directives: directives.length > 0 ? directives : undefined,
 			includeThinking: options?.includeThinking !== false,
 		});
 	}
@@ -2240,6 +2329,7 @@ export async function compact<TMessage = Message>(
 		...(persistedText.length > 0 ? { text: persistedText } : {}),
 		...(textHead ? { textHead } : {}),
 		...(textTail ? { textTail } : {}),
+		...ledger,
 	};
 
 	const textNote = textChars > 0 ? ` (+${textChars.toLocaleString()} chars as text)` : "";

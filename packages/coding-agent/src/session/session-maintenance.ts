@@ -3465,11 +3465,13 @@ export class SessionMaintenance {
 		// - tiktoken cl100k ≈ 4 chars/token on ASCII (verified empirically
 		//   for prose, code, and JSON); a 1.15 multiplier absorbs tokenizer
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
+		// - The USER DIRECTIVES ledger prints up to `DIRECTIVES_MAX_CHARS` of
+		//   verbatim text ahead of HISTORY, charged like a third text edge.
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
 		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
+		const textEdgeTokens = Math.ceil(((2 * edgeCap + snapcompact.DIRECTIVES_MAX_CHARS) * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
 		const capReserve = textEdgeTokens + SUMMARY_TEMPLATE_TOKENS;
 		const frameBudget = totalBudget - baseTokens - capReserve;
@@ -3836,7 +3838,7 @@ export class SessionMaintenance {
 		);
 		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
+		const textEdgeTokens = Math.ceil(((2 * edgeCap + snapcompact.DIRECTIVES_MAX_CHARS) * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
 		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
 		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;

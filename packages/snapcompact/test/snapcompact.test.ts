@@ -11,6 +11,11 @@ function createUserMessage(content: string): Message {
 	return { role: "user", content, timestamp: 0 };
 }
 
+/** A mid-turn user interjection: the agent loop persists it with `steering: true`. */
+function createSteeringMessage(content: string): Message {
+	return { role: "user", content, steering: true, timestamp: 0 };
+}
+
 const ZERO_USAGE: Usage = {
 	input: 0,
 	output: 0,
@@ -1160,6 +1165,112 @@ describe("compact", () => {
 	});
 });
 
+describe("user directive ledger", () => {
+	const directive = "fuck the timed run do it now";
+	const longTurn = (label: string) => `${label} sentinel. ${"Important fact number one. ".repeat(1500)}`;
+
+	it("prints a steering message from the compacted range verbatim in the summary", async () => {
+		const result = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createUserMessage("Run the benchmark."),
+					createAssistantMessage([{ type: "text", text: "Starting the timed run." }]),
+					createSteeringMessage(directive),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE },
+		);
+		expect(result.summary).toContain(`USER DIRECTIVES\n===================`);
+		expect(result.summary).toContain(`¶user:${directive}`);
+		expect(snapcompact.getPreservedArchive(result.preserveData)?.directives).toEqual([directive]);
+	});
+
+	it("keeps the directive as text when its transcript position is imaged or dropped", async () => {
+		const result = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createUserMessage(longTurn("HEAD")),
+					createSteeringMessage(directive),
+					createUserMessage(longTurn("TAIL")),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 1 },
+		);
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		// The directive sits in the middle: one imaged page, the rest dropped.
+		expect(archive?.frames).toHaveLength(1);
+		expect(archive?.truncatedChars).toBeGreaterThan(0);
+		expect(archive?.textHead).not.toContain(directive);
+		expect(archive?.textTail).not.toContain(directive);
+		const historyText = (archive ? snapcompact.historyBlocks(archive) : [])
+			.filter((block): block is { type: "text"; text: string } => block.type === "text")
+			.map(block => block.text)
+			.join("\n");
+		expect(historyText).not.toContain(directive);
+		expect(result.summary).toContain(`¶user:${directive}`);
+		expect(result.summary).toContain("older middle history dropped");
+	});
+
+	it("carries the ledger through a second compaction of the compacted output", async () => {
+		const first = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage(longTurn("HEAD")), createSteeringMessage(directive)],
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 1 },
+		);
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createUserMessage(longTurn("NEXT")),
+					createSteeringMessage("also skip the third run"),
+					createUserMessage(longTurn("LAST")),
+				],
+				previousSummary: first.summary,
+				previousPreserveData: first.preserveData,
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 1 },
+		);
+		const archive = snapcompact.getPreservedArchive(second.preserveData);
+		expect(archive?.directives).toEqual([directive, "also skip the third run"]);
+		expect(second.summary).toContain(`¶user:${directive}\n\n¶user:also skip the third run`);
+	});
+
+	it("keeps the newest directives under the caps and states how many older ones were omitted", async () => {
+		const overflow = 3;
+		const many = Array.from({ length: snapcompact.DIRECTIVES_MAX_COUNT + overflow }, (_, i) => `directive ${i}`);
+		const byCount = await snapcompact.compact(
+			makePreparation({ messagesToSummarize: many.map(createSteeringMessage) }),
+			{ frameSize: TEST_FRAME_SIZE },
+		);
+		const capped = snapcompact.getPreservedArchive(byCount.preserveData);
+		expect(capped?.directives).toEqual(many.slice(overflow));
+		expect(capped?.omittedDirectives).toBe(overflow);
+		expect(byCount.summary).toContain(`[…${overflow} older directives omitted…]`);
+
+		// The newest directive is kept whole even when it alone exceeds the
+		// character cap; everything older falls off and the count says so.
+		const huge = "x".repeat(snapcompact.DIRECTIVES_MAX_CHARS + 1);
+		const byChars = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createSteeringMessage("older"), createSteeringMessage(huge)],
+				previousPreserveData: byCount.preserveData,
+			}),
+			{ frameSize: TEST_FRAME_SIZE },
+		);
+		const evicted = snapcompact.getPreservedArchive(byChars.preserveData);
+		expect(evicted?.directives).toEqual([huge]);
+		expect(evicted?.omittedDirectives).toBe(overflow + snapcompact.DIRECTIVES_MAX_COUNT + 1);
+	});
+
+	it("leaves archives without steering messages unchanged", async () => {
+		const result = await snapcompact.compact(makePreparation(), { frameSize: TEST_FRAME_SIZE });
+		expect(result.summary).not.toContain("USER DIRECTIVES");
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		expect(archive).not.toHaveProperty("directives");
+		expect(archive).not.toHaveProperty("omittedDirectives");
+	});
+});
+
 describe("archive helpers", () => {
 	it("getPreservedArchive rejects malformed payloads", () => {
 		expect(snapcompact.getPreservedArchive(undefined)).toBeUndefined();
@@ -1190,6 +1301,15 @@ describe("archive helpers", () => {
 			textTail: "newest unframed history",
 		};
 		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: archive })).toEqual(archive);
+
+		const ledger: snapcompact.Archive = { ...archive, directives: ["keep going"], omittedDirectives: 2 };
+		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: ledger })).toEqual(ledger);
+		// Malformed ledger entries drop; an empty or negative ledger leaves the fields off.
+		expect(
+			snapcompact.getPreservedArchive({
+				[snapcompact.PRESERVE_KEY]: { ...archive, directives: ["", 5, "keep going"], omittedDirectives: -1 },
+			}),
+		).toEqual({ ...archive, directives: ["keep going"] });
 	});
 
 	it("stripPreservedArchive drops the frame archive and collapses to undefined when empty", () => {

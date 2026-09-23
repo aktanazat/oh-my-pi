@@ -19,7 +19,13 @@ Reading HISTORY:
 {{/if}}{{#if truncatedChars}}- About {{truncatedChars}} characters of older middle history dropped to fit archive budget.
 {{/if}}- If an exact earlier detail matters and a section is unclear, re-derive from workspace (re-read files, re-run commands), rather than guess.
 
-{{#if files}}FILES
+{{#if directives}}USER DIRECTIVES
+===================
+Verbatim user interjections from the archived turns, oldest→newest, kept as text no matter where they fall in HISTORY. Each supersedes any earlier plan or instruction that conflicts with it.
+
+{{directives}}
+
+{{/if}}{{#if files}}FILES
 ===================
 {{files}}
 
