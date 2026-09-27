@@ -915,16 +915,13 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		const kind = getClaudeModelKind(context);
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
 	},
+	healsUnscopedBlocks: true,
 	/**
-	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
-	 * Anthropic can restore the tier earlier (plan change, corrected counter),
-	 * and the block then idles a usable account for days. Judge each tier scope
-	 * against the limits that actually gate a request of that kind — its own
-	 * weekly row plus the shared umbrella windows — so a healthy report lifts
-	 * the block while a spent shared 5-hour wall keeps it.
-	 *
-	 * Only Fable/Mythos appear: {@link blockScope} scopes reactive blocks for
-	 * those tiers alone, so no other scope can exist to heal.
+	 * Anthropic can restore quota before a recorded reset. Unscoped
+	 * Opus/Sonnet blocks are gated by the shared windows and any reported
+	 * Opus/Sonnet limits; Fable/Mythos blocks also require their own tier row.
+	 * A complete healthy report can recover an account without waiting days
+	 * for a stale block to expire.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
@@ -941,10 +938,18 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			const tier = limit.scope.tier;
 			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 		}
-		return [...tiers].map(tier => ({
-			blockScope: `tier:${tier}`,
-			limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
-		}));
+		return [
+			{
+				blockScope: "",
+				limits: report.limits.filter(
+					limit => limit.scope.shared === true || limit.scope.tier === "opus" || limit.scope.tier === "sonnet",
+				),
+			},
+			...[...tiers].map(tier => ({
+				blockScope: `tier:${tier}`,
+				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
+			})),
+		];
 	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

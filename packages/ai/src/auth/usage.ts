@@ -315,6 +315,7 @@ export class UsageService implements UsageApi {
 		const cached = forceRefresh ? undefined : this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
 		if (cached && cached.expiresAt > now) {
+			if (cached.value) this.#deps.blocks.reconcileRequest(request, cached.value);
 			return cached.value;
 		}
 

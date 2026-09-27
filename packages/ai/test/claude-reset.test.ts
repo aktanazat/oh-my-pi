@@ -3,6 +3,7 @@ import { consumeClaudeResetCredit, listClaudeResetCredits, type UsageResetCredit
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext } from "@oh-my-pi/pi-ai/usage";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeResetClearedBlockScopes } from "@oh-my-pi/pi-ai/usage/claude-reset";
 
 interface CapturedCall {
 	url: string;
@@ -74,6 +75,24 @@ function cedarPayload() {
 		},
 	};
 }
+
+describe("claudeResetClearedBlockScopes", () => {
+	it("returns an account-wide reset scope only once", async () => {
+		const { fetch } = recordingFetch(() =>
+			json(200, {
+				five_hour: { utilization: 100, resets_at: "2099-09-28T00:00:00Z" },
+				seven_day: { utilization: 40, resets_at: "2099-10-01T00:00:00Z" },
+			}),
+		);
+		const report = await claudeUsageProvider.fetchUsage(
+			{ provider: "anthropic", credential: { type: "oauth", accessToken: "test-token" } },
+			{ fetch },
+		);
+		if (!report) throw new Error("Expected a Claude usage report");
+
+		expect(claudeResetClearedBlockScopes(["anthropic:5h"], report)).toEqual([undefined]);
+	});
+});
 
 describe("listClaudeResetCredits", () => {
 	it("prefers Cedar and normalizes counts, eligibility, expiry, and covered windows", async () => {

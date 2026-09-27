@@ -384,14 +384,9 @@ export class CredentialBlocks implements BlocksApi {
 	}
 
 	/**
-	 * Whether a fresh report could lift what currently blocks this credential.
-	 *
-	 * A strategy that names healable scopes can only vouch for those scopes, so
-	 * a live unscoped block — an Opus/Sonnet usage limit, a refresh failure —
-	 * keeps the credential unusable whatever the report says about a tier. A
-	 * probe then cannot change the outcome and must not be spent; the tier scope
-	 * heals on a later pass, once the block that actually holds the credential
-	 * has lifted.
+	 * Whether a fresh report could lift a block on this credential.
+	 * Reconciliation checks the provider's declared scopes and keeps recent
+	 * rejections blocked while the usage endpoint catches up.
 	 */
 	canHeal(
 		provider: Provider,
@@ -399,8 +394,11 @@ export class CredentialBlocks implements BlocksApi {
 		credentialIndex: number,
 		blockScopeOrScopes: string | readonly string[] | undefined,
 	): boolean {
-		if (!this.supportsHealing(provider)) return false;
-		if (this.blockedUntil(provider, providerKey, credentialIndex) !== undefined) return false;
+		const strategy = this.#deps.strategies(provider);
+		if (!strategy?.healableBlockScopes) return false;
+		if (!strategy.healsUnscopedBlocks && this.blockedUntil(provider, providerKey, credentialIndex) !== undefined) {
+			return false;
+		}
 		return this.blockedUntil(provider, providerKey, credentialIndex, blockScopeOrScopes) !== undefined;
 	}
 

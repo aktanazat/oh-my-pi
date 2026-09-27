@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed healthy Claude Opus and Sonnet accounts remaining blocked until an old quota deadline; fresh complete usage reports, including cached reports, now clear stale account-wide blocks without clearing recent rejections or exhausted limits ([#13452](https://github.com/can1357/oh-my-pi/pull/13452)).
+
 ## [18.3.4] - 2026-09-27
 
 ### Fixed

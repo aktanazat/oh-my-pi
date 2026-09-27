@@ -478,6 +478,8 @@ export interface CredentialRankingStrategy {
 	 * block written under one scope is invisible to requests and to healing.
 	 */
 	blockScopes?(context?: CredentialRankingContext): string[];
+	/** Opt into usage probes behind account-wide blocks that this strategy can heal. */
+	healsUnscopedBlocks?: true;
 	/**
 	 * Backoff scopes a fresh usage report can vouch for, each with the limits
 	 * gating it. {@link AuthStorage} clears a stale block under a returned scope

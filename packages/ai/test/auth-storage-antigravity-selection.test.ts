@@ -141,6 +141,42 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		}
 	});
 
+	test.each(["selection", "health"] as const)(
+		"does not probe usage behind an unscoped Antigravity block through %s",
+		async operation => {
+			if (!authStorage || !store?.upsertCredentialBlock) throw new Error("test setup failed");
+			await authStorage.credentials.set("google-antigravity", [
+				{ type: "oauth", ...createCredential("acct-blocked", "project-blocked", "blocked@example.com") },
+				{ type: "oauth", ...createCredential("acct-sibling", "project-sibling", "sibling@example.com") },
+			]);
+			const blockedRow = store.listAuthCredentials("google-antigravity").find(row => {
+				const credential = row.credential;
+				return credential.type === "oauth" && credential.accountId === "acct-blocked";
+			});
+			if (!blockedRow) throw new Error("expected blocked credential row");
+			store.upsertCredentialBlock({
+				credentialId: blockedRow.id,
+				providerKey: "google-antigravity:oauth",
+				blockScope: "",
+				blockedUntilMs: Date.now() + HOUR_MS,
+			});
+			const usageRequests = vi.spyOn(usageProvider, "fetchUsage");
+			const modelId = "gemini-3-flash";
+
+			if (operation === "selection") {
+				expect(await authStorage.keys.get("google-antigravity", "global-block-gemini", { modelId })).toBe(
+					"api-acct-sibling",
+				);
+			} else {
+				const health = await authStorage.health.model("google-antigravity", { modelId, reserveFraction: 0 });
+				expect(health.accounts.find(account => account.credentialId === blockedRow.id)?.state).toBe("depleted");
+			}
+			expect(
+				usageRequests.mock.calls.filter(([params]) => params.credential.accountId === "acct-blocked"),
+			).toHaveLength(0);
+		},
+	);
+
 	test("blocks exhausted Antigravity Gemini counter without blocking healthy Claude counter", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

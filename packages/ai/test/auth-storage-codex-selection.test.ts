@@ -1366,32 +1366,43 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(activeAccounts).toEqual(["acct-A", "acct-B"]);
 	});
 
-	test("honors a persisted unscoped Codex block for Spark requests", async () => {
-		if (!authStorage || !store?.upsertCredentialBlock) throw new Error("test setup failed");
-		await authStorage.credentials.set("openai-codex", [
-			{ type: "oauth", ...createCredential("acct-globally-blocked", "globally-blocked@example.com") },
-			{ type: "oauth", ...createCredential("acct-sibling", "sibling@example.com") },
-		]);
-		const blockedRow = store.listAuthCredentials("openai-codex").find(row => {
-			const credential = row.credential;
-			return credential.type === "oauth" && credential.accountId === "acct-globally-blocked";
-		});
-		if (!blockedRow) throw new Error("expected blocked credential row");
-		store.upsertCredentialBlock({
-			credentialId: blockedRow.id,
-			providerKey: "openai-codex:oauth",
-			blockScope: "",
-			blockedUntilMs: Date.now() + HOUR_MS,
-		});
+	test.each(["selection", "health"] as const)(
+		"does not probe usage behind an unscoped Codex block through %s",
+		async operation => {
+			if (!authStorage || !store?.upsertCredentialBlock) throw new Error("test setup failed");
+			await authStorage.credentials.set("openai-codex", [
+				{ type: "oauth", ...createCredential("acct-globally-blocked", "globally-blocked@example.com") },
+				{ type: "oauth", ...createCredential("acct-sibling", "sibling@example.com") },
+			]);
+			const blockedRow = store.listAuthCredentials("openai-codex").find(row => {
+				const credential = row.credential;
+				return credential.type === "oauth" && credential.accountId === "acct-globally-blocked";
+			});
+			if (!blockedRow) throw new Error("expected blocked credential row");
+			store.upsertCredentialBlock({
+				credentialId: blockedRow.id,
+				providerKey: "openai-codex:oauth",
+				blockScope: "",
+				blockedUntilMs: Date.now() + HOUR_MS,
+			});
+			const usageRequests = vi.spyOn(usageProvider, "fetchUsage");
+			const modelId = "gpt-5.3-codex-spark";
 
-		for (let index = 0; index < 20; index++) {
+			if (operation === "selection") {
+				for (let index = 0; index < 20; index++) {
+					expect(await authStorage.keys.get("openai-codex", `global-block-spark-${index}`, { modelId })).toBe(
+						"api-acct-sibling",
+					);
+				}
+			} else {
+				const health = await authStorage.health.model("openai-codex", { modelId, reserveFraction: 0 });
+				expect(health.accounts.find(account => account.credentialId === blockedRow.id)?.state).toBe("depleted");
+			}
 			expect(
-				await authStorage.keys.get("openai-codex", `global-block-spark-${index}`, {
-					modelId: "gpt-5.3-codex-spark",
-				}),
-			).toBe("api-acct-sibling");
-		}
-	});
+				usageRequests.mock.calls.filter(([params]) => params.credential.accountId === "acct-globally-blocked"),
+			).toHaveLength(0);
+		},
+	);
 
 	test("a healthy live Codex usage report clears a stale persisted block so the account is selectable again", async () => {
 		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {

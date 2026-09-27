@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -76,19 +76,22 @@ function oauthRow(id: number): StoredAuthCredential {
 interface HealHarness {
 	storage: AuthStorage;
 	clearedScopes: string[];
-	/** Usage requests the selection path spent while the credential was blocked. */
-	probeCount: () => number;
 	/** Persisted blocks, keyed `credentialId:blockScope`, so a test can add one. */
 	blocks: Map<string, number>;
+	reconcileAfter: Map<string, number>;
 }
 
-function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarness {
+function makeHarness(
+	report: UsageReport | null,
+	blockScope = "tier:fable",
+	siblingReport = nearlySpentSiblingReport(),
+): HealHarness {
 	const rows = [oauthRow(1), oauthRow(2)];
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	const blocks = new Map<string, number>();
+	const reconcileAfter = new Map<string, number>();
 	blocks.set(`1:${blockScope}`, Date.now() + 3 * 24 * 60 * 60_000);
 	const clearedScopes: string[] = [];
-	let probes = 0;
 	const store: AuthCredentialStore = {
 		close() {},
 		listAuthCredentials: provider => rows.filter(row => provider === undefined || row.provider === provider),
@@ -102,6 +105,8 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		async deleteAuthCredentials() {},
 		getCredentialBlock: (credentialId: number, _providerKey: string, scope: string) =>
 			blocks.get(`${credentialId}:${scope}`),
+		getCredentialBlockReconcileAfter: (credentialId, _providerKey, scope) =>
+			reconcileAfter.get(`${credentialId}:${scope}`) ?? 0,
 		upsertCredentialBlock: block => {
 			blocks.set(`${block.credentialId}:${block.blockScope}`, block.blockedUntilMs);
 		},
@@ -122,8 +127,7 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		id: "anthropic",
 		fetchUsage: async params => {
 			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
-			if (access === "access-2") return nearlySpentSiblingReport();
-			probes += 1;
+			if (access === "access-2") return siblingReport;
 			return report;
 		},
 	};
@@ -132,14 +136,18 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
 		configValueResolver: async value => value,
 	});
-	return { storage, clearedScopes, probeCount: () => probes, blocks };
+	return { storage, clearedScopes, blocks, reconcileAfter };
 }
 
 describe("claude usage-block healing", () => {
 	const storages: AuthStorage[] = [];
+	beforeEach(() => {
+		vi.spyOn(Date, "now").mockReturnValue(1_790_465_000_000);
+	});
 	afterEach(() => {
 		for (const storage of storages) storage.close();
 		storages.length = 0;
+		vi.restoreAllMocks();
 	});
 
 	it("pairs each tier scope with the shared windows that also gate it", () => {
@@ -217,24 +225,79 @@ describe("claude usage-block healing", () => {
 		expect(await storage.keys.get("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
 
-	it("spends no usage request on a block its scopes cannot heal", async () => {
-		// An unscoped block (Opus/Sonnet usage limit, refresh failure) is outside
-		// every scope the strategy vouches for, so probing cannot change it.
-		const { storage, clearedScopes, probeCount } = makeHarness(
-			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+	it.each(["claude-opus-5-5", "claude-sonnet-4-5"])(
+		"selects the recovered account for %s instead of an exhausted sibling",
+		async modelId => {
+			const { storage, blocks } = makeHarness(
+				claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0)]),
+				"",
+				{
+					...claudeReport([sharedLimit("5h", "5h", 1), sharedLimit("7d", "7d", 0.27)]),
+					metadata: { accountId: "account-2" },
+				},
+			);
+			storages.push(storage);
+			blocks.set("2:", Date.now() + 10 * 60_000);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "s-recovered", { modelId })).toBe("access-1");
+			const health = await storage.health.model("anthropic", { modelId, reserveFraction: 0.1 });
+			expect(health.state).toBe("healthy");
+			expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("healthy");
+		},
+	);
+
+	it.each(["5h missing", "7d missing", "5h spent", "7d spent", "opus spent", "sonnet spent", "missing", "stale"])(
+		"keeps an unscoped block when the report is %s",
+		async condition => {
+			const limits = [
+				sharedLimit("5h", "5h", condition === "5h spent" ? 1 : 0),
+				sharedLimit("7d", "7d", condition === "7d spent" ? 1 : 0),
+			].filter(limit => `${limit.window?.id} missing` !== condition);
+			if (condition === "opus spent") limits.push(tierLimit("opus", 1));
+			if (condition === "sonnet spent") limits.push(tierLimit("sonnet", 1));
+			const report =
+				condition === "missing"
+					? null
+					: claudeReport(limits, Date.now() - (condition === "stale" ? 60 * 60_000 : 0));
+			const { storage } = makeHarness(report, "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "s-still-blocked", { modelId: "claude-opus-5-5" })).toBe(
+				"access-2",
+			);
+		},
+	);
+
+	it("does not clear a recent unscoped rejection using lagging healthy usage", async () => {
+		const { storage, reconcileAfter } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0)]),
 			"",
 		);
 		storages.push(storage);
+		reconcileAfter.set("1:", Date.now() + 5 * 60_000);
 		await storage.credentials.reload();
 
-		const health = await storage.health.model("anthropic", {
-			modelId: "claude-fable-5-1",
-			reserveFraction: 0.1,
-		});
+		expect(await storage.keys.get("anthropic", "s-recent-rejection", { modelId: "claude-opus-5-5" })).toBe(
+			"access-2",
+		);
+	});
 
-		expect(probeCount()).toBe(0);
-		expect(clearedScopes).toEqual([]);
-		expect(health.accounts[0]?.state).toBe("depleted");
+	it("recovers from a cached healthy report once the recent-rejection window ends", async () => {
+		const now = Date.now();
+		const { storage, reconcileAfter } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0)]),
+			"",
+		);
+		storages.push(storage);
+		reconcileAfter.set("1:", now + 60_000);
+		await storage.credentials.reload();
+		await storage.usage.reports();
+
+		vi.spyOn(Date, "now").mockReturnValue(now + 60_001);
+
+		expect(await storage.keys.get("anthropic", "s-cached-recovery", { modelId: "claude-opus-5-5" })).toBe("access-1");
 	});
 
 	it("keeps the block when the report predates it", async () => {
@@ -255,11 +318,8 @@ describe("claude usage-block healing", () => {
 		expect(await storage.keys.get("anthropic", "s-stale", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
 
-	it("spends no probe while an unscoped block also holds the credential", async () => {
-		// A tier block written after a global one carries the later deadline, but
-		// the global block still makes the credential unusable, so clearing the
-		// tier early buys nothing and the request must not be spent.
-		const { storage, probeCount, blocks } = makeHarness(
+	it("recovers an account with both stale unscoped and tier blocks", async () => {
+		const { storage, blocks } = makeHarness(
 			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
 		);
 		storages.push(storage);
@@ -271,7 +331,9 @@ describe("claude usage-block healing", () => {
 			reserveFraction: 0.1,
 		});
 
-		expect(probeCount()).toBe(0);
-		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("depleted");
+		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("healthy");
+		expect(await storage.keys.get("anthropic", "s-recovered-scopes", { modelId: "claude-fable-5-1" })).toBe(
+			"access-1",
+		);
 	});
 });
