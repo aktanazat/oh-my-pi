@@ -1883,7 +1883,7 @@ describe("agentLoop with AgentMessage", () => {
 		);
 		expect(toolEnds.length).toBe(2);
 		expect(toolEnds[0].isError).toBe(false);
-		expect(toolEnds[1].isError).toBe(true);
+		expect(toolEnds[1].isError).toBe(false);
 		expect(toolEnds[1].result.details).toEqual({
 			__synthetic: true,
 			source: "interrupt_skipped",
@@ -2069,7 +2069,7 @@ describe("agentLoop with AgentMessage", () => {
 		);
 		expect(toolEnds.length).toBe(2);
 		expect(toolEnds[0].isError).toBe(false);
-		expect(toolEnds[1].isError).toBe(true);
+		expect(toolEnds[1].isError).toBe(false);
 		const skippedContent = toolEnds[1].result.content[0];
 		expect(skippedContent?.type).toBe("text");
 		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");

@@ -3656,7 +3656,11 @@ async function executeToolCalls(
 				toolName: record.toolCall.name,
 				status: "skipped",
 			});
-			emitToolResult(record, createSkippedToolResult(interruptState.source, false), true);
+			// An interruptible wait the interrupt preempted before it started took
+			// the designed wake path, the same one a wait cut short mid-run reports
+			// as a normal result. Anything else left without a result failed.
+			const preemptedWait = record.interruptible && interruptState.triggered && !record.started;
+			emitToolResult(record, createSkippedToolResult(interruptState.source, false), !preemptedWait);
 		}
 	}
 	await speculationCoordinator?.discardAll("candidate was not dispatched");

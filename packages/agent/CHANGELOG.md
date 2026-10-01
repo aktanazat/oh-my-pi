@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an interruptible wait skipped before it started, because a message or completion was already queued, being reported as a failed tool call; it is now a normal result, as when the interrupt lands mid-wait.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
