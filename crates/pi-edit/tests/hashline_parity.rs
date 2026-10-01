@@ -1345,3 +1345,31 @@ fn hashline_streaming_preview_cases_preserve_partial_and_final_contracts() {
 			.is_some_and(|error| error.contains("File not found"))
 	);
 }
+
+#[tokio::test]
+async fn tag_recovery_rebinds_a_path_tail_outside_cwd_but_never_a_bare_name() {
+	// A second checkout outside the working tree, read earlier in the session.
+	let checkout = tempfile::tempdir().expect("second checkout");
+	let target = checkout.path().canonicalize().expect("canonical checkout").join("sub/file.ts");
+	std::fs::create_dir_all(target.parent().expect("target parent")).expect("mkdir");
+	let source = "export const a = 1;\n";
+	std::fs::write(&target, source).expect("seed target");
+	let workspace = Workspace::new(EditMode::Hashline);
+	let tag = workspace.store.record(&canonical_key(&target), source, None);
+	let writer = common::DiskWriter::default();
+
+	let bare = workspace
+		.apply_json(&json!({ "input": format!("[file.ts#{tag}]\nPUT 1.=1:\n+export const a = 2;") }), &writer)
+		.await;
+	assert!(bare.is_err(), "a bare filename must not rebind outside cwd");
+	assert_eq!(std::fs::read_to_string(&target).expect("target"), source);
+
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[sub/file.ts#{tag}]\nPUT 1.=1:\n+export const a = 2;") }),
+			&writer,
+		)
+		.await
+		.expect("the tag names sub/file.ts in the other checkout");
+	assert_eq!(std::fs::read_to_string(&target).expect("target"), "export const a = 2;\n");
+}

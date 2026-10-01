@@ -6,6 +6,7 @@
 
 - Fixed hashline edits rejecting a line you already read because an earlier same-length edit elsewhere in the file left it in place.
 - Fixed hashline edits rejecting a line inside a block of up to 10 lines the previous edit had just added; edit results now show such blocks in full.
+- Fixed hashline edits failing with "File not found" when the header path dropped the leading directories of a file read outside the working directory; the edit now finds that file when the path names its last two or more components.
 
 ## [18.4.6] - 2026-10-01
 

@@ -260,14 +260,19 @@ impl PathPolicy {
 	}
 
 	/// Whether hashline tag recovery may rebind `authored` onto `recovered`.
-	/// Only filesystem paths rebind; URL-shaped targets never do.
+	/// Only filesystem paths rebind; URL-shaped targets never do. Inside cwd or
+	/// a plan-writable root a matching name rebinds; elsewhere the authored
+	/// path must name the target by a tail of two or more components, so a
+	/// bare filename never reaches outside the working tree.
 	pub fn allow_tag_path_recovery(&self, authored: &str, recovered: &Path) -> bool {
-		if !matches!(self.address(unwrap_hashline_header_path(authored)), Address::Path) {
+		let authored = unwrap_hashline_header_path(authored);
+		if !matches!(self.address(authored), Address::Path) {
 			return false;
 		}
 		let recovered = lexical_absolute(recovered, &self.cwd);
 		is_within(&recovered, &lexical_absolute(&self.cwd, &self.cwd))
 			|| self.in_plan_writable_root(&recovered)
+			|| names_path_tail(authored, &recovered)
 	}
 
 	/// Return the model-facing generated-file rejection, when applicable.
@@ -323,6 +328,25 @@ pub fn unwrap_hashline_header_path(target: &str) -> &str {
 		None => inner,
 	};
 	if path.is_empty() { target } else { path }
+}
+
+/// Whether `authored` names `target` by its trailing components: a relative
+/// path (a leading `~/` stripped) of two or more components, without `..`.
+fn names_path_tail(authored: &str, target: &Path) -> bool {
+	let relative = authored.strip_prefix("~/").unwrap_or(authored);
+	let mut tail = PathBuf::new();
+	let mut parts = 0_usize;
+	for component in Path::new(relative).components() {
+		match component {
+			Component::Normal(part) => {
+				tail.push(part);
+				parts += 1;
+			},
+			Component::CurDir => {},
+			Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+		}
+	}
+	parts >= 2 && target.ends_with(&tail)
 }
 
 /// Snapshot key: realpath, parent realpath plus basename, or input.
