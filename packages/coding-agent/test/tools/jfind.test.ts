@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import { tokenUsage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
+import * as judgment from "@oh-my-pi/pi-coding-agent/judgment";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
@@ -373,6 +374,33 @@ describe("jfind cascade", () => {
 				tool.execute("x", { query: "anything", grep_keywords: [], path: "omp://tools/read.md:1-10" }),
 			).rejects.toThrow("line-range selectors are not supported");
 		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("reports a judge outage as a failed find, not as an empty search", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-outage-"));
+		vi.spyOn(judgment, "resolveJudge").mockReturnValue(
+			new FakeJudge(() => new Error("API error (402): insufficient credits")),
+		);
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function parseToken() { return 1; }\n");
+			const tool = new FindTool({
+				cwd: dir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({ "find.enabled": "on" }),
+				modelRegistry: {} as never,
+			});
+			const result = await tool.execute("x", { query: "token parsing", grep_keywords: [] });
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const [lead = ""] = text.split("\n");
+			expect(result.isError).toBe(true);
+			expect(lead).not.toStartWith("no hits");
+			expect(lead).toContain("insufficient credits");
+		} finally {
+			vi.restoreAllMocks();
 			await removeWithRetries(dir);
 		}
 	});

@@ -8,6 +8,7 @@
 - Fixed hashline edits rejecting a line inside a block of up to 10 lines the previous edit had just added; edit results now show such blocks in full.
 - Fixed hashline edits failing with "File not found" when the header path dropped the leading directories of a file read outside the working directory; the edit now finds that file when the path names its last two or more components.
 - Fixed `wait` failing with an error instead of returning normally when a message or background completion interrupts it while it refreshes the service list.
+- `find` now says it could not run, with the first failure, when every judge request fails, instead of reporting no hits.
 
 ## [18.4.6] - 2026-10-01
 

@@ -125,8 +125,15 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		}));
 		const details: FindToolDetails = { query, keywords, threshold, hits, stats, elapsedMs, cwd, scopePath };
 		const where = scopePath === undefined ? "" : ` in ${scopePath}`;
+		const allFailed = stats.requests > 0 && stats.errors === stats.requests;
 		const out: string[] = [];
-		if (hits.length === 0) {
+		if (hits.length === 0 && allFailed) {
+			// Nothing was judged, so an empty hit list says nothing about the code.
+			const cause = stats.failures[0];
+			out.push(
+				`find could not run: all ${stats.requests} judge requests failed${cause ? ` (${cause})` : ""}. These are not search results; search with grep or glob instead.`,
+			);
+		} else if (hits.length === 0) {
 			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
 		} else {
 			out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`, "");
@@ -150,7 +157,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			);
 		}
 		const builder = toolResult(details).text(out.join("\n"));
-		if (stats.requests > 0 && stats.errors === stats.requests) builder.error();
+		if (allFailed) builder.error();
 		else if (hits.length === 0) builder.useless();
 		return builder.done();
 	}
