@@ -13,8 +13,8 @@
 		},
 		{
 			"name": "collapses long contiguous added runs to head, marker, and tail",
-			"input": "+10|line 1\n+11|line 2\n+12|line 3\n+13|line 4\n+14|line 5\n+15|line 6\n+16|line 7",
-			"expect": { "preview": "10:line 1\n11:line 2\n…\n15:line 6\n16:line 7", "addedLines": 7, "removedLines": 0 }
+			"input": "+10|line 1\n+11|line 2\n+12|line 3\n+13|line 4\n+14|line 5\n+15|line 6\n+16|line 7\n+17|line 8\n+18|line 9\n+19|line 10\n+20|line 11\n+21|line 12",
+			"expect": { "preview": "10:line 1\n11:line 2\n…\n20:line 11\n21:line 12", "addedLines": 12, "removedLines": 0 }
 		},
 		{
 			"name": "normalizes adjacent elision markers to one unicode marker",

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed hashline edits rejecting a line you already read because an earlier same-length edit elsewhere in the file left it in place.
+- Fixed hashline edits rejecting a line inside a block of up to 10 lines the previous edit had just added; edit results now show such blocks in full.
 
 ## [18.4.6] - 2026-10-01
 

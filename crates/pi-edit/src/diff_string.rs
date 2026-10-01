@@ -32,6 +32,9 @@ const DIFF_METADATA_PREFIXES: [&str; 15] = [
 ];
 const PATCH_WRAPPER_PREFIXES: [&str; 2] = ["*** Begin Patch", "*** End Patch"];
 const DEFAULT_ADDED_RUN_CONTEXT_LINES: usize = 2;
+/// Added runs up to this long display in full: the next edit often anchors
+/// inside the block it just wrote, and an elided line counts as never seen.
+const FULL_ADDED_RUN_LINES: usize = 10;
 const PREVIEW_ELISION_MARKER: &str = "…";
 const PREVIEW_GAP_ROW: &str = "";
 
@@ -665,7 +668,7 @@ fn append_added_run(output: &mut Vec<String>, run: &[String], edge_lines: usize)
 	if run.is_empty() {
 		return;
 	}
-	let collapse_threshold = edge_lines * 2 + 1;
+	let collapse_threshold = (edge_lines * 2 + 1).max(FULL_ADDED_RUN_LINES);
 	if run.len() <= collapse_threshold {
 		for line in run {
 			append_preview_line(output, line);
@@ -1385,27 +1388,27 @@ mod tests {
 
 	#[test]
 	fn compact_preview_collapses_long_added_runs() {
-		let diff = (0..7)
+		let diff = (0..12)
 			.map(|index| format!("+{}|line {}", 10 + index, index + 1))
 			.collect::<Vec<_>>()
 			.join("\n");
 		let preview = build_compact_diff_preview(&diff, &CompactDiffOptions::default());
-		assert_eq!(preview.preview, "10:line 1\n11:line 2\n…\n15:line 6\n16:line 7");
-		assert_eq!((preview.added_lines, preview.removed_lines), (7, 0));
+		assert_eq!(preview.preview, "10:line 1\n11:line 2\n…\n20:line 11\n21:line 12");
+		assert_eq!((preview.added_lines, preview.removed_lines), (12, 0));
 	}
 
 	#[test]
 	fn compact_preview_honors_added_run_options() {
-		let diff = (0..8)
+		let diff = (0..12)
 			.map(|index| format!("+{}|line {}", 1 + index, index + 1))
 			.collect::<Vec<_>>()
 			.join("\n");
 		let options =
 			CompactDiffOptions { max_added_run_context: Some(1), max_unchanged_run: Some(3) };
-		assert_eq!(build_compact_diff_preview(&diff, &options).preview, "1:line 1\n…\n8:line 8");
+		assert_eq!(build_compact_diff_preview(&diff, &options).preview, "1:line 1\n…\n12:line 12");
 		let alias =
 			CompactDiffOptions { max_added_run_context: None, max_unchanged_run: Some(1) };
-		assert_eq!(build_compact_diff_preview(&diff, &alias).preview, "1:line 1\n…\n8:line 8");
+		assert_eq!(build_compact_diff_preview(&diff, &alias).preview, "1:line 1\n…\n12:line 12");
 	}
 
 	#[test]

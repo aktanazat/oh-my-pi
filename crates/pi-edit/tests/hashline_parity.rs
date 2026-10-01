@@ -236,10 +236,11 @@ fn compact_diff_preview_matches_all_diff_preview_cases() {
 			"collapses long contiguous added runs to head, marker, and tail",
 			concat!(
 				"+10|line 1\n+11|line 2\n+12|line 3\n+13|line 4\n",
-				"+14|line 5\n+15|line 6\n+16|line 7",
+				"+14|line 5\n+15|line 6\n+16|line 7\n+17|line 8\n",
+				"+18|line 9\n+19|line 10\n+20|line 11\n+21|line 12",
 			),
-			"10:line 1\n11:line 2\n…\n15:line 6\n16:line 7",
-			7,
+			"10:line 1\n11:line 2\n…\n20:line 11\n21:line 12",
+			12,
 			0,
 		),
 		(
@@ -1131,6 +1132,33 @@ async fn edit_results_carry_seen_lines_an_equal_length_edit_left_in_place() {
 		.replacen("line10\n", "LINE10\n", 1)
 		.replacen("line35\n", "LINE35\n", 1);
 	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn edit_results_show_a_short_added_block_in_full_so_its_lines_count_as_seen() {
+	let source = "line1\nline2\nline3\nline4\n";
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("a.txt", source);
+	let read_tag = workspace.snapshot("a.txt", source, Some(&[1, 2, 3, 4]));
+	let writer = common::DiskWriter::default();
+
+	let block = (1..=7).map(|n| format!("+new{n}")).collect::<Vec<_>>().join("\n");
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{read_tag}]\nPUT >2:\n{block}") }), &writer)
+		.await
+		.expect("inserts a seven-line block after line 2");
+	let inserted_tag = file_hash(&workspace.read("a.txt").expect("inserted file"));
+
+	// Line 6 is the middle of the block the previous result reported.
+	workspace
+		.apply_json(&json!({ "input": format!("[a.txt#{inserted_tag}]\nPUT 6.=6:\n+NEW4") }), &writer)
+		.await
+		.expect("the previous edit result displayed every line of its own block");
+	assert_eq!(
+		workspace.read("a.txt").as_deref(),
+		Some("line1\nline2\nnew1\nnew2\nnew3\nNEW4\nnew5\nnew6\nnew7\nline3\nline4\n")
+	);
 }
 
 #[tokio::test]
