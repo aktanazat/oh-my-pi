@@ -449,23 +449,40 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 }
 
 /// Prior-snapshot lines that keep both their number and content in `after`:
-/// the unchanged leading run, filtered by what `prior` displayed. A missing or
-/// unrestricted prior snapshot let the edit anchor anywhere, so the whole run
-/// carries over. Lines after the first change shifted, so their old numbers
-/// never carry.
+/// lines of unchanged diff runs that the edit left at their old number,
+/// filtered by what `prior` displayed. A missing or unrestricted prior
+/// snapshot let the edit anchor anywhere, so every such line carries over.
+/// Lines an insertion or deletion shifted never carry: their old numbers now
+/// name other content.
 fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
-	let unchanged = before
-		.split('\n')
-		.zip(after.split('\n'))
-		.take_while(|(old, new)| old == new)
-		.count();
-	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
-	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
-		// `range(1..=0)` panics; a first-line change carries nothing.
-		_ if unchanged == 0 => Vec::new(),
-		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
-		_ => (1..=unchanged).collect(),
+	let seen = prior
+		.and_then(|snapshot| snapshot.seen_lines.as_ref())
+		.filter(|seen| !seen.is_empty());
+	let old_lines = before.split('\n').collect::<Vec<_>>();
+	let new_lines = after.split('\n').collect::<Vec<_>>();
+	let (old_ids, new_ids) = pi_diff::intern(&old_lines, &new_lines);
+	let mut carried = Vec::new();
+	let mut old_line = 1_u32;
+	let mut new_line = 1_u32;
+	for run in pi_diff::myers_diff(&old_ids, &new_ids) {
+		if run.added {
+			new_line += run.count;
+		} else if run.removed {
+			old_line += run.count;
+		} else {
+			if old_line == new_line {
+				// Myers runs are never empty, so the range is never inverted.
+				let lines = old_line..=old_line + run.count - 1;
+				match seen {
+					Some(seen) => carried.extend(seen.range(lines)),
+					None => carried.extend(lines),
+				}
+			}
+			old_line += run.count;
+			new_line += run.count;
+		}
 	}
+	carried
 }
 
 /// Model-facing text for one file (`formatEditResultText`).

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed hashline edits rejecting a line you already read because an earlier same-length edit elsewhere in the file left it in place.
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
