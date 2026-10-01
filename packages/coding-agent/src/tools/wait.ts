@@ -144,7 +144,20 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
-		if (cfgLaunchEnabled.get(this.session.settings)) await listServices(this.session, signal);
+		if (cfgLaunchEnabled.get(this.session.settings)) {
+			try {
+				await listServices(this.session, signal);
+			} catch (error) {
+				// The loop interrupts a wait as soon as a message or completion is
+				// queued, which can land while this refresh is still in flight.
+				if (signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
+				return {
+					content: [{ type: "text", text: "Wait interrupted by message." }],
+					details: { op: "wait", jobs: [], interrupted: true },
+					useless: true,
+				};
+			}
+		}
 		const deadline = Date.now() + WAIT_MAX_MS;
 		// Opened by the first message-only block and kept across re-evaluations,
 		// so a peer stopping mid-window cannot restart it.

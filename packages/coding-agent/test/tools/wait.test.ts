@@ -3,14 +3,16 @@ import { TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import * as brokerClients from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
-function session(manager?: AsyncJobManager, agentId = "Main"): ToolSession {
+function session(manager?: AsyncJobManager, agentId = "Main", launchEnabled = false): ToolSession {
 	return {
 		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": false }),
+		settings: Settings.isolated({ "launch.enabled": launchEnabled }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
@@ -93,6 +95,32 @@ describe("wait", () => {
 		await manager.waitForAll();
 		await manager.drainDeliveries({ timeoutMs: 500 });
 		expect(delivered).toEqual(["finished afterward"]);
+	});
+
+	test("a message interrupt during the service-list refresh is the same non-error wake", async () => {
+		// Launch is on by default, so a production wait first refreshes the
+		// service list through the broker client; a completion already queued
+		// when the wait starts interrupts that request.
+		using tempDir = TempDir.createSync("@omp-wait-refresh-");
+		const client = await brokerClients.createDaemonBrokerClient(tempDir.path(), {
+			runtimeDir: tempDir.path(),
+			idleGraceMs: 5_000,
+		});
+		vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
+		try {
+			const controller = new AbortController();
+			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+			const result = await new WaitTool(session(undefined, "Main", true)).execute(
+				"interrupted-during-refresh",
+				{},
+				controller.signal,
+			);
+			expect(result.isError).toBeUndefined();
+			expect(result.details).toMatchObject({ op: "wait", interrupted: true });
+		} finally {
+			vi.restoreAllMocks();
+			client.close();
+		}
 	});
 
 	test("returns a settled job whose delivery has not reached the transcript yet", async () => {
