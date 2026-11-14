@@ -3,7 +3,6 @@ import { DapClient } from "@oh-my-pi/pi-coding-agent/dap/client";
 import { DapSessionManager } from "@oh-my-pi/pi-coding-agent/dap/session";
 import type {
 	DapCapabilities,
-	DapClientState,
 	DapEventMessage,
 	DapResolvedAdapter,
 	DapThread,
@@ -35,7 +34,6 @@ interface FakeOptions {
 }
 
 class FakeDapClient {
-	readonly proc: DapClientState["proc"];
 	readonly port = 8123;
 	readonly requests: Array<{ command: string; args: unknown }> = [];
 	readonly #events = new Map<string, Set<EventHandler>>();
@@ -44,26 +42,17 @@ class FakeDapClient {
 	#alive = true;
 	disposed = false;
 
+	/** Mirrors the real client's transport-end signal for the session manager. */
+	get exited(): Promise<void> {
+		return this.#exited.promise;
+	}
+
 	constructor(
 		readonly childConfiguration?: Record<string, unknown>,
 		readonly childRequest: "launch" | "attach" = "launch",
 		readonly stopOnStart = true,
 		readonly options: FakeOptions = {},
-	) {
-		this.proc = {
-			exited: this.#exited.promise,
-			exitCode: null,
-			stdin: { write: () => 0, flush: () => undefined },
-			stdout: new ReadableStream<Uint8Array>(),
-			stderr: new ReadableStream<Uint8Array>(),
-			peekStderr: () => "",
-			kill: () => {
-				this.#alive = false;
-				this.#exited.resolve();
-				return true;
-			},
-		} as unknown as DapClientState["proc"];
-	}
+	) {}
 
 	async initialize(): Promise<DapCapabilities> {
 		queueMicrotask(() => this.#emit("initialized", {}));
