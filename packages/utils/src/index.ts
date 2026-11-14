@@ -58,3 +58,5 @@ export function structuredCloneJSON<T>(value: T): T {
 	}
 	return JSON.parse(JSON.stringify(value)) as T;
 }
+
+// CI baseline probe: see PR description. Safe to revert.
