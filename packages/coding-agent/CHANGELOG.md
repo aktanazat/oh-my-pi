@@ -23,6 +23,7 @@
 - Fixed resize and display replays, ensuring stable rendering and full transcript flushing on agent shutdown
 - Fixed fast tool completions leaving a permanent running summary that blocked transcript retirement and squeezed later tool output.
 - Fixed `omp git` hunk navigation (`alt+↓`/`alt+↑`) appearing to do nothing while the file sidebar had focus: the diff cursor band now stays visible (dimmed) when the pane is unfocused.
+- Fixed DAP clients attached to an already-running server reporting a fabricated child process: the client's process state now distinguishes spawned adapters from process-less socket connections, so liveness and exit reporting are truthful for both.
 
 ## [18.0.4] - 2026-08-24
 

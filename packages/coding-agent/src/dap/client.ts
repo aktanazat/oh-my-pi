@@ -4,14 +4,15 @@ import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
 import type {
+	DapAdapterProcess,
 	DapCapabilities,
-	DapClientState,
 	DapEventMessage,
 	DapInitializeArguments,
 	DapPendingRequest,
 	DapRequestMessage,
 	DapResolvedAdapter,
 	DapResponseMessage,
+	DapWriteSink,
 } from "./types";
 
 interface DapSpawnOptions {
@@ -25,12 +26,6 @@ interface DapSpawnOptions {
 	 * @internal
 	 */
 	socketReadyTimeoutMs?: number;
-}
-
-/** Minimal write interface shared by Bun.FileSink and Bun TCP sockets. */
-interface DapWriteSink {
-	write(data: string | Uint8Array): number | Promise<number>;
-	flush(): number | Promise<number> | undefined;
 }
 
 type DapEventHandler = (body: unknown, event: DapEventMessage) => void | Promise<void>;
@@ -54,7 +49,12 @@ function toErrorMessage(value: unknown): string {
 export class DapClient {
 	readonly adapter: DapResolvedAdapter;
 	readonly cwd: string;
-	readonly proc: DapClientState["proc"];
+	/**
+	 * What backs the transport — a spawned adapter child process, or (socket
+	 * mode) no process at all. Readers must narrow on `kind` before touching
+	 * process state.
+	 */
+	readonly proc: DapAdapterProcess;
 	/** TCP server port reused by child DAP sessions. */
 	readonly port?: number;
 	/** ReadableStream of DAP bytes — from proc.stdout (stdio) or a socket (socket mode). */
@@ -68,6 +68,9 @@ export class DapClient {
 	#messageBuffer: Buffer = Buffer.alloc(0);
 	#isReading = false;
 	#disposed = false;
+	/** Settles when the transport ends — child process exit or socket close. */
+	#exited: Promise<void>;
+	#transportEnded = false;
 	#lastActivity = Date.now();
 	#capabilities?: DapCapabilities;
 	#eventHandlers = new Map<string, Set<DapEventHandler>>();
@@ -83,7 +86,7 @@ export class DapClient {
 	constructor(
 		adapter: DapResolvedAdapter,
 		cwd: string,
-		proc: DapClientState["proc"],
+		proc: DapAdapterProcess,
 		options?: {
 			readable?: ReadableStream<Uint8Array>;
 			writeSink?: DapWriteSink;
@@ -94,14 +97,33 @@ export class DapClient {
 		this.adapter = adapter;
 		this.cwd = cwd;
 		this.proc = proc;
-		this.#readable = options?.readable ?? (proc.stdout as ReadableStream<Uint8Array>);
-		this.#writeSink = options?.writeSink ?? proc.stdin;
+		let readable = options?.readable;
+		let writeSink = options?.writeSink;
+		if (proc.kind === "spawned") {
+			// A spawned adapter's own pipes are the transport when no explicit
+			// one was handed in.
+			readable ??= proc.process.stdout;
+			writeSink ??= proc.process.stdin;
+		} else if (!readable || !writeSink) {
+			// Socket transports have no child process to fall back on; without
+			// an explicit transport pair the client would be a silent no-op.
+			throw new Error(`DAP socket-mode client for ${adapter.name} requires readable and writeSink options`);
+		}
+		this.#readable = readable;
+		this.#writeSink = writeSink;
 		this.#socket = options?.socket;
 		this.port = options?.port;
-		this.proc.exited.then(
-			() => this.#rejectPendingWritesForExit(),
-			() => this.#rejectPendingWritesForExit(),
-		);
+		// Normalize the exit signal: a spawned child's `exited` rejects on
+		// abnormal termination (ptree semantics); transport end must settle
+		// exactly once, either way.
+		this.#exited =
+			proc.kind === "spawned"
+				? proc.process.exited.then(
+						() => {},
+						() => {},
+					)
+				: proc.exited;
+		this.#exited.then(() => this.#onTransportEnded());
 	}
 
 	static async spawn({ adapter, cwd, socketReadyTimeoutMs }: DapSpawnOptions): Promise<DapClient> {
@@ -125,7 +147,7 @@ export class DapClient {
 			env,
 			detached: true,
 		});
-		const client = new DapClient(adapter, cwd, proc);
+		const client = new DapClient(adapter, cwd, { kind: "spawned", process: proc });
 		proc.exited.then(() => {
 			client.#handleProcessExit();
 		});
@@ -147,18 +169,16 @@ export class DapClient {
 	}): Promise<DapClient> {
 		const exited = Promise.withResolvers<void>();
 		const { readable, writeSink, socket } = await connectTcpSocket(host, port, () => exited.resolve());
-		const proc = {
+		// No process backs this transport — the adapter is already running and
+		// the connection is a socket. The state says so explicitly instead of
+		// casting a fabricated child process into the field.
+		const proc: DapAdapterProcess = {
+			kind: "socket",
 			exited: exited.promise,
-			exitCode: null,
-			stdin: { write: () => 0, flush: () => undefined },
-			stdout: new ReadableStream<Uint8Array>(),
-			stderr: new ReadableStream<Uint8Array>(),
-			peekStderr: () => "",
 			kill: () => {
 				exited.resolve();
-				return true;
 			},
-		} as unknown as DapClientState["proc"];
+		};
 		const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket, port });
 		exited.promise.then(() => client.#handleProcessExit());
 		void client.#startMessageReader();
@@ -203,7 +223,12 @@ export class DapClient {
 			const readyTimeoutMs = socketReadyTimeoutMs ?? SOCKET_READY_TIMEOUT_MS;
 			await waitForTcpServerListening(proc, port, readyTimeoutMs);
 			const { readable, writeSink, socket } = await waitForTcpTransport(host, port, readyTimeoutMs, proc);
-			const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket, port });
+			const client = new DapClient(
+				adapter,
+				cwd,
+				{ kind: "spawned", process: proc },
+				{ readable, writeSink, socket, port },
+			);
 			proc.exited.then(() => client.#handleProcessExit());
 			void client.#startMessageReader();
 			return client;
@@ -261,7 +286,12 @@ export class DapClient {
 		try {
 			await waitForCondition(() => isUnixSocketReady(socketPath), timeoutMs, proc);
 			const { readable, writeSink, socket } = await connectSocket({ unix: socketPath }, timeoutMs);
-			const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
+			const client = new DapClient(
+				adapter,
+				cwd,
+				{ kind: "spawned", process: proc },
+				{ readable, writeSink, socket },
+			);
 			proc.exited.then(() => client.#handleProcessExit());
 			void client.#startMessageReader();
 			return client;
@@ -322,7 +352,12 @@ export class DapClient {
 		try {
 			const rawSocket = await Promise.race([connPromise, timeoutPromise]);
 			const { readable, writeSink, socket } = wrapBunSocket(rawSocket);
-			const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
+			const client = new DapClient(
+				adapter,
+				cwd,
+				{ kind: "spawned", process: proc },
+				{ readable, writeSink, socket },
+			);
 			proc.exited.then(() => client.#handleProcessExit());
 			void client.#startMessageReader();
 			return client;
@@ -339,6 +374,11 @@ export class DapClient {
 		}
 	}
 
+	/** Settles when the adapter transport ends — child process exit or socket close. */
+	get exited(): Promise<void> {
+		return this.#exited;
+	}
+
 	get capabilities(): DapCapabilities | undefined {
 		return this.#capabilities;
 	}
@@ -348,7 +388,11 @@ export class DapClient {
 	}
 
 	isAlive(): boolean {
-		return !this.#disposed && this.proc.exitCode === null;
+		if (this.#disposed) return false;
+		if (this.proc.kind === "spawned") return this.proc.process.exitCode === null;
+		// Socket-backed clients have no exit code to read; the connection is
+		// alive until its end has settled.
+		return !this.#transportEnded;
 	}
 
 	async initialize(args: DapInitializeArguments, signal?: AbortSignal, timeoutMs?: number): Promise<DapCapabilities> {
@@ -577,15 +621,19 @@ export class DapClient {
 		} catch {
 			/* socket may already be closed */
 		}
-		try {
+		if (this.proc.kind === "spawned") {
+			try {
+				this.proc.process.kill();
+			} catch (error) {
+				logger.debug("Failed to kill DAP adapter", {
+					adapter: this.adapter.name,
+					error: toErrorMessage(error),
+				});
+			}
+		} else {
 			this.proc.kill();
-		} catch (error) {
-			logger.debug("Failed to kill DAP adapter", {
-				adapter: this.adapter.name,
-				error: toErrorMessage(error),
-			});
 		}
-		await this.proc.exited.catch(() => {});
+		await this.#exited;
 	}
 
 	async #startMessageReader(): Promise<void> {
@@ -727,14 +775,25 @@ export class DapClient {
 	#handleProcessExit(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
-		const stderr = this.proc.peekStderr().trim();
-		const exitCode = this.proc.exitCode;
+		// Only a spawned adapter has a process to interrogate; a socket-backed
+		// client ends when its connection does, with nothing to kill or read.
+		if (this.proc.kind === "socket") {
+			this.#failConnection(new Error(`DAP adapter connection closed (${this.adapter.name})`));
+			return;
+		}
+		const stderr = this.proc.process.peekStderr().trim();
+		const exitCode = this.proc.process.exitCode;
 		const error = new Error(
 			stderr
 				? `DAP adapter exited (code ${exitCode}): ${stderr}`
 				: `DAP adapter exited unexpectedly (code ${exitCode})`,
 		);
 		this.#failConnection(error);
+	}
+
+	#onTransportEnded(): void {
+		this.#transportEnded = true;
+		this.#rejectPendingWritesForExit();
 	}
 
 	/** Reject every in-flight request and wake every event waiter with `error`.

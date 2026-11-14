@@ -7,8 +7,8 @@ import * as dapModule from "@oh-my-pi/pi-coding-agent/dap";
 import { connectSocket, DapClient, waitForTcpServerListening } from "@oh-my-pi/pi-coding-agent/dap/client";
 import { DapSessionManager } from "@oh-my-pi/pi-coding-agent/dap/session";
 import type {
+	DapAdapterProcess,
 	DapCapabilities,
-	DapClientState,
 	DapEventMessage,
 	DapResolvedAdapter,
 } from "@oh-my-pi/pi-coding-agent/dap/types";
@@ -59,11 +59,15 @@ server.stop();
 type DapEventHandler = (body: unknown, event: DapEventMessage) => void | Promise<void>;
 
 class FakeDapClient {
-	readonly proc: DapClientState["proc"];
 	readonly #exited = Promise.withResolvers<void>();
 	readonly #handlers = new Map<string, Set<DapEventHandler>>();
 	#alive = true;
 	requests: Array<{ command: string; args: unknown }> = [];
+
+	/** Mirrors the real client's transport-end signal for the session manager. */
+	get exited(): Promise<void> {
+		return this.#exited.promise;
+	}
 
 	constructor(
 		readonly adapter: DapResolvedAdapter,
@@ -79,21 +83,7 @@ class FakeDapClient {
 			rejectStopWaiters?: boolean;
 			stopAfterLaunch?: boolean;
 		},
-	) {
-		this.proc = {
-			exited: this.#exited.promise,
-			exitCode: null,
-			stdin: { write: () => 0, flush: () => undefined },
-			stdout: new ReadableStream<Uint8Array>(),
-			stderr: new ReadableStream<Uint8Array>(),
-			peekStderr: () => "",
-			kill: () => {
-				this.#alive = false;
-				this.#exited.resolve();
-				return true;
-			},
-		} as unknown as DapClientState["proc"];
-	}
+	) {}
 
 	async initialize(): Promise<DapCapabilities> {
 		if (!this.options.deferInitialized) {
@@ -396,20 +386,23 @@ describe("DAP launch failure handling", () => {
 
 	it("times out promptly and does not emit an unhandled rejection when the stdin flush is wedged", async () => {
 		const procExited = Promise.withResolvers<number>();
-		const proc = {
-			exited: procExited.promise,
-			exitCode: null,
-			stdin: { write: () => 0, flush: () => undefined },
-			stdout: new ReadableStream<Uint8Array>(),
-			stderr: new ReadableStream<Uint8Array>(),
-			peekStderr: () => "",
-			kill: () => {
-				procExited.resolve(-1);
-				return true;
+		// A faithful fake of the spawned-process surface the client consumes —
+		// structurally typed, no cast. flush() returns a promise that never
+		// resolves, modeling an adapter whose stdin has stopped draining (the
+		// failure mode in issue #4233).
+		const proc: DapAdapterProcess = {
+			kind: "spawned",
+			process: {
+				exited: procExited.promise,
+				exitCode: null,
+				stdin: { write: () => 0, flush: () => undefined },
+				stdout: new ReadableStream<Uint8Array>(),
+				peekStderr: () => "",
+				kill: () => {
+					procExited.resolve(-1);
+				},
 			},
-		} as unknown as DapClientState["proc"];
-		// flush() returns a promise that never resolves — models an adapter whose
-		// stdin has stopped draining (the failure mode in issue #4233).
+		};
 		const writeSink = {
 			write: (_data: string | Uint8Array) => 0,
 			flush: () => new Promise<number>(() => {}),

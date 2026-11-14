@@ -1,5 +1,3 @@
-import type { ptree } from "@oh-my-pi/pi-utils";
-
 export type DapMessage = DapRequestMessage | DapResponseMessage | DapEventMessage;
 export type DapSessionStatus = "launching" | "configuring" | "stopped" | "running" | "terminated";
 
@@ -463,10 +461,47 @@ export interface DapPendingRequest {
 	command: string;
 }
 
+/** Minimal write interface shared by Bun.FileSink and Bun TCP sockets. */
+export interface DapWriteSink {
+	write(data: string | Uint8Array): number | Promise<number>;
+	flush(): number | Promise<number> | undefined;
+}
+
+/**
+ * The surface of a spawned adapter child process the client consumes.
+ * Structural (rather than `ptree.ChildProcess`) so the client depends only on
+ * what it reads and test doubles can implement it without casting.
+ */
+export interface DapChildProcess {
+	/** Resolves with the exit code; rejects when the process is killed or dies abnormally (ptree semantics). */
+	readonly exited: Promise<number>;
+	/** Exit code once the process is gone; null while it is running. */
+	readonly exitCode: number | null;
+	/** Adapter stdin — the default write sink for stdio/tcp modes. */
+	readonly stdin: DapWriteSink;
+	/** Adapter stdout — the default read stream for stdio/tcp modes. */
+	readonly stdout: ReadableStream<Uint8Array>;
+	/** Truncated stderr tail, used to explain an abnormal exit. */
+	peekStderr(): string;
+	kill(): void;
+}
+
+/**
+ * How a DAP client's transport is backed: a spawned adapter child process
+ * (stdio and tcp modes), or no process at all (socket mode — `connect()`
+ * attaches to an already-running server, so the transport ends when the socket
+ * closes). Keeping the process-less case in the union, instead of casting a
+ * fabricated child process into the field, makes "no process" explicit and
+ * checkable at every reader.
+ */
+export type DapAdapterProcess =
+	| { readonly kind: "spawned"; readonly process: DapChildProcess }
+	| { readonly kind: "socket"; readonly exited: Promise<void>; readonly kill: () => void };
+
 export interface DapClientState {
 	adapterName: string;
 	cwd: string;
-	proc: ptree.ChildProcess<"pipe">;
+	proc: DapAdapterProcess;
 	requestSeq: number;
 	pendingRequests: Map<number, DapPendingRequest>;
 	messageBuffer: Uint8Array;

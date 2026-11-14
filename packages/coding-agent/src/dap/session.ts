@@ -1451,7 +1451,7 @@ export class DapSessionManager {
 			}
 		}, HEARTBEAT_INTERVAL_MS);
 		heartbeat.unref?.();
-		void client.proc.exited.finally(() => {
+		void client.exited.finally(() => {
 			clearInterval(heartbeat);
 			session.status = "terminated";
 			this.#reactivateAfterTermination(session);
