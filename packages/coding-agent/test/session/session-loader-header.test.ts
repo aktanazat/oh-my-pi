@@ -28,8 +28,8 @@ class LargeFileSessionStorage extends FileSessionStorage {
 	}
 }
 
-function writeJsonl(file: string, entries: unknown[]): Promise<void> {
-	return Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+async function writeJsonl(file: string, entries: unknown[]): Promise<void> {
+	await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
 }
 
 // A well-formed entry that is NOT a session header: exactly the foreign first
